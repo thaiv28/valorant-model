@@ -2,6 +2,7 @@
 
 import threading
 import time
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -46,7 +47,8 @@ class Fetcher:
             self._wait_for_slot()
             try:
                 return self.get(url)
-            except (URLError, TimeoutError) as exc:
+            # Dropped connections (RemoteDisconnected, resets) are retried like timeouts.
+            except (URLError, TimeoutError, ConnectionError, HTTPException) as exc:
                 if isinstance(exc, HTTPError) and not (
                     exc.code == 429 or 500 <= exc.code < 600
                 ):

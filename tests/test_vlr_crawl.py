@@ -274,3 +274,19 @@ def test_rate_limit_pauses_all_workers():
     # The retry waited out the shared pause, and so does the next caller.
     assert sum(sleeps) >= 5
     assert fetcher._paused_until <= clock[0]
+
+
+def test_dropped_connection_is_retried():
+    from http.client import RemoteDisconnected
+
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise RemoteDisconnected("Remote end closed connection without response")
+        return "ok"
+
+    fetcher = Fetcher(get=get, sleep=lambda s: None, min_interval=0)
+    assert fetcher.text("a") == "ok"
+    assert len(calls) == 2
