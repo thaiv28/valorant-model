@@ -292,14 +292,14 @@ def test_glicko_registry_and_exact_grids():
     for region in (False, True):
         name = "player_round" + ("_region" if region else "") + "_glicko"
         grid = {
-            "k": (8, 12, 16, 24, 32, 48),
+            "k": (16, 24, 32, 48, 64),
             "tau": (0.4, 0.5, 0.6, 0.8),
-            "rd_new": (200, 280, 350),
-            "rd_info": (0.0625, 0.125, 0.25),
+            "rd_new": (280, 350, 450, 600),
+            "rd_info": (0.125, 0.25, 0.5, 1.0),
             "new_player": ("fixed", "teammates"),
         }
         if region:
-            grid["region_k"] = (2, 4, 8)
+            grid["region_k"] = (2, 4)
         assert PARAM_GRIDS[name] == grid
         model = MODELS[name]()
         assert model.unit == "player" and model.credit == "round" and model.rd

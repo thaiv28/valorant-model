@@ -9,8 +9,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from promval.blend import combine, fit, walk_forward
 from promval.evaluation import (
     ece,
     game_losses,
@@ -258,6 +260,15 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     assert "## Holdout" not in report
     assert "Holdout maps=" not in result.stdout
     assert "## Leaderboard" in report
+    assert "Series blended Δ log loss" in report
+    assert "Map blended flat ROI" in report
+    assert "Map blended Kelly $" in report
+    assert report.count("#### Log loss vs Kalshi (blended)") == 3
+    assert report.count("#### Full-Kelly returns (blended)") == 3
+    assert "excluded from blended tables: 2 rows" in report
+    assert "| 2023-01 | series | 0 | 1.000000 | 0.000000 | unfitted |" in report
+    blended = report.split("#### Log loss vs Kalshi (blended)")[1]
+    assert "| series | all | 0 |" in blended
     assert "| team_elo | all | 5 |" in report
     assert "| team_elo | all | 1 |" in report
     for name in ("team_elo", "team_round", "player_binary_region"):
@@ -315,6 +326,7 @@ def test_empty_windows_and_invalid_selection(database, tmp_path, monkeypatch):
         ["--score-from", "2026-06-30T23:30:00"],
         ["--models", "nonexistent"],
         ["--jobs", "0"],
+        ["--blend-min", "0"],
     ):
         with pytest.raises(SystemExit) as error:
             benchmark.main(args + extra)
@@ -377,8 +389,8 @@ def test_glicko_report_default_and_explicit_models(
     }
     report = out.read_text()
     assert report.index("## Combined summary") < report.index("## Leaderboard")
-    assert report.count("#### Log loss vs Kalshi") == 3
-    assert report.count("#### Full-Kelly returns") == 3
+    assert report.count("#### Log loss vs Kalshi\n") == 3
+    assert report.count("#### Full-Kelly returns\n") == 3
     assert "| series | vct |" in report and "| map | international=0 |" in report
     assert "in-sample" in report and "unrounded" in report
     assert "no depth limit or slippage" in report
@@ -388,6 +400,137 @@ def test_glicko_report_default_and_explicit_models(
     assert len(printed.splitlines()) <= 20
     selected = benchmark.main(args + ["--report-models", "team_elo,team_elo"])
     assert set(selected) == {"team_elo"}
-    assert out.read_text().count("#### Full-Kelly returns") == 1
+    assert out.read_text().count("#### Full-Kelly returns\n") == 1
     with pytest.raises(SystemExit):
         benchmark.main(args + ["--report-models", "unknown"])
+
+
+def test_blend_recovers_coefficients_and_team_symmetry():
+    rng = np.random.default_rng(42)
+    mid, p = rng.uniform(0.05, 0.95, (2, 80000))
+    expected = (0.8, 0.35)
+    probability = combine(p, mid, *expected)
+    won = rng.binomial(1, probability)
+    a, b, n = fit(p, mid, won)
+    assert (a, b) == pytest.approx(expected, abs=0.025)
+    assert n == len(won)
+    assert combine(p, mid) == pytest.approx(mid)
+    assert combine(1 - p, 1 - mid, a, b) == pytest.approx(1 - combine(p, mid, a, b))
+    assert combine([0, 1], [0, 1]) == pytest.approx([0.01, 0.99])
+    # Collinearity and complete separation still produce finite fits.
+    assert np.isfinite(fit([0.8] * 20, [0.8] * 20, [1] * 20)).all()
+
+
+def test_blend_walk_forward_boundaries_kinds_and_exclusion():
+    records = []
+    for month in ("2022-12", "2023-01", "2023-02", "2023-03", "2026-07", "2026-08"):
+        for kind in ("series", "map"):
+            for i in range(12):
+                records.append(
+                    {
+                        "start_utc": f"{month}-01T00:00:00Z",
+                        "kind": kind,
+                        "p": 0.2 + (i % 4) * 0.2,
+                        "market_p": 0.3 + (i % 3) * 0.2,
+                        "won": int(i % 3 == (0 if kind == "series" else 1)),
+                        "section": "vct",
+                        "international": 0,
+                        "match_id": len(records),
+                        "ask": 0.51,
+                        "bid": 0.49,
+                    }
+                )
+    frame = pd.DataFrame(records).sample(frac=1, random_state=4)
+    rows, snapshots = walk_forward(frame, min_rows=12)
+    dates = pd.to_datetime(rows.start_utc, utc=True)
+    january = rows[dates.dt.strftime("%Y-%m") == "2023-01"]
+    assert not january.blend_fitted.any()
+    assert (january.blend_n == 0).all()
+    assert january.p_blend.tolist() == january.market_p.tolist()
+    for kind in ("series", "map"):
+        training = frame[
+            (frame.start_utc.str.startswith("2023-01")) & (frame.kind == kind)
+        ]
+        expected = fit(training.p, training.market_p, training.won)
+        february = rows[(dates.dt.month == 2) & (rows.kind == kind)]
+        assert february.blend_a.tolist() == pytest.approx([expected[0]] * 12)
+        assert february.blend_b.tolist() == pytest.approx([expected[1]] * 12)
+        assert (february.blend_n == 12).all()
+    fits = snapshots[snapshots.month == "2023-02"]
+    assert fits.a.nunique() == 2
+    # Changing same-month/later labels must not change February predictions.
+    changed = frame.copy()
+    changed.loc[changed.start_utc >= "2023-02", "won"] = 1
+    later, _ = walk_forward(changed, min_rows=12)
+    february = dates.dt.strftime("%Y-%m") == "2023-02"
+    assert (
+        rows.loc[february, "p_blend"].tolist()
+        == later.loc[february, "p_blend"].tolist()
+    )
+    # Even August snapshots never train on July holdout outcomes.
+    assert (snapshots[snapshots.month == "2026-08"].n == 36).all()
+    january_losses, january_returns = benchmark.market_tables(
+        january, probability="p_blend"
+    )
+    assert "| series | all | 0 | — |" in january_losses
+    assert "| series | all | 0 | 0 |" in january_returns
+    losses, _ = benchmark.market_tables(rows, probability="p_blend")
+    assert (
+        f"| series | all | {sum(rows.blend_fitted & (rows.kind == 'series'))} |"
+        in losses
+    )
+    summary = benchmark.summary_table({"test": january})
+    assert "Series blended Δ log loss" in summary
+    assert summary.splitlines()[-1].endswith("— | — | $50.00 | — | — | $50.00 |")
+    with pytest.raises(ValueError):
+        walk_forward(frame, min_rows=0)
+
+
+def test_end_to_end_fitted_blend(database, tmp_path, monkeypatch):
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE matches SET start_utc='2023-02-01T00:00:00Z',best_of=3,winner=1 WHERE match_id=3"
+        )
+        for event, kind, game_id in (("S2", "series", None), ("M2", "map", 31)):
+            conn.execute(
+                "INSERT INTO kalshi_links VALUES (?,3,?,?,'exact',NULL)",
+                (event, game_id, kind),
+            )
+            conn.execute(
+                "INSERT INTO kalshi_markets(ticker,series,event_ticker,kind,competitor_id) VALUES (?,?,?,?,?)",
+                (event + "a", "KXVALORANTGAME", event, kind, "a"),
+            )
+            candles = data / "kalshi/candles"
+            (candles / f"{event}a.json.gz").write_bytes(
+                (candles / f"{event[0]}a.json.gz").read_bytes()
+            )
+    report_path = tmp_path / "fitted.md"
+    benchmark.main(
+        [
+            "--db",
+            str(path),
+            "--out",
+            str(report_path),
+            "--models",
+            "team_elo",
+            "--report-models",
+            "team_elo",
+            "--jobs",
+            "1",
+            "--k-grid",
+            "32",
+            "--blend-min",
+            "1",
+        ]
+    )
+    report = report_path.read_text()
+    fits = report.split("#### Monthly market blend fits")[1]
+    assert "| 2023-02 | series | 1 |" in fits
+    assert "| 2023-02 | map | 1 |" in fits
+    assert fits.count("| fitted |") == 2
+    assert "excluded from blended tables: 2 rows" in fits
+    loss = report.split("#### Log loss vs Kalshi (blended)")[1]
+    assert "| series | all | 1 |" in loss
+    assert "| map | all | 1 |" in loss

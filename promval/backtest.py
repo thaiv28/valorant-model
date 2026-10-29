@@ -15,14 +15,14 @@ def fee(cost):
     return 0.07 * cost * (1 - cost)
 
 
-def select_bets(frame):
+def select_bets(frame, probability="p"):
     """Choose the larger positive after-fee edge; skip incomplete quotes.
 
     Returned ``cost`` includes fees, ``fraction`` is full Kelly, and ``profit``
     is realized profit for a flat $1 all-in stake.
     """
     bets = frame.copy()
-    for name in ("ask", "bid", "p", "won", "match_id", "start_utc"):
+    for name in ("ask", "bid", probability, "won", "match_id", "start_utc"):
         if name not in bets:
             bets[name] = np.nan
     ask = pd.to_numeric(bets["ask"], errors="coerce")
@@ -32,7 +32,7 @@ def select_bets(frame):
     )
     bets = bets.loc[valid].copy()
     ask, other_ask = ask.loc[valid], other_ask.loc[valid]
-    p = bets["p"].astype(float)
+    p = bets[probability].astype(float)
     first_edge = p - ask - fee(ask)
     second_edge = 1 - p - other_ask - fee(other_ask)
     first = first_edge >= second_edge
@@ -73,9 +73,9 @@ def kelly_path(bets, initial=50.0):
     return path, drawdown, largest
 
 
-def summarize(frame, n_resamples=2000, seed=0):
+def summarize(frame, n_resamples=2000, seed=0, probability="p"):
     """Flat ROI with whole-match bootstrap and a separate full-Kelly path."""
-    bets = select_bets(frame)
+    bets = select_bets(frame, probability=probability)
     path, drawdown, largest = kelly_path(bets)
     low = high = roi = mean_edge = float("nan")
     if not bets.empty:

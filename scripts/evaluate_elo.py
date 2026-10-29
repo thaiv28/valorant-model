@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from promval.backtest import summarize
+from promval.blend import walk_forward
 from promval.evaluation import (
     HOLDOUT_START,
     ece,
@@ -206,7 +207,9 @@ def market_slices(frame):
             )
 
 
-def market_tables(frame):
+def market_tables(frame, probability="p"):
+    if probability == "p_blend":
+        frame = frame[frame.blend_fitted]
     loss_lines = [
         "| Kind | Slice | Rows | Model log loss | Kalshi log loss | Difference [95% interval] | Significant |",
         "|---|---|---:|---:|---:|---|---|",
@@ -219,7 +222,7 @@ def market_tables(frame):
         if rows.empty:
             loss_lines.append(f"| {kind} | {label} | 0 | — | — | — | — |")
         else:
-            model_loss = game_losses(rows.p, rows.won).log_loss
+            model_loss = game_losses(rows[probability], rows.won).log_loss
             market_loss = game_losses(rows.market_p, rows.won).log_loss
             diff, low, high = paired_bootstrap(
                 model_loss, market_loss, clusters=rows.match_id
@@ -229,7 +232,7 @@ def market_tables(frame):
                 f"| {kind} | {label} | {len(rows)} | {model_loss.mean():.6f} | "
                 f"{market_loss.mean():.6f} | {diff:.6f} [{low:.6f}, {high:.6f}] | {significant} |"
             )
-        stats = summarize(rows)
+        stats = summarize(rows, probability=probability)
         edge = f"{stats['mean_edge']:.4f}" if stats["bets"] else "—"
         roi = (
             f"{stats['flat_roi']:.2%} [{stats['roi_low']:.2%}, {stats['roi_high']:.2%}]"
@@ -245,30 +248,36 @@ def market_tables(frame):
 
 
 def summary_table(markets):
-    lines = [
-        "| Model | Series Δ log loss | Series flat ROI | Series Kelly $ | Map Δ log loss | Map flat ROI | Map Kelly $ |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+    labels = [
+        f"{kind}{suffix} {metric}"
+        for suffix in ("", " blended")
+        for kind in ("Series", "Map")
+        for metric in ("Δ log loss", "flat ROI", "Kelly $")
     ]
+    lines = ["| Model | " + " | ".join(labels) + " |", "|---|" + "---:|" * len(labels)]
     for name, frame in markets.items():
         cells = [name]
-        for kind in ("series", "map"):
-            rows = frame[frame.kind == kind] if not frame.empty else frame
-            stats = summarize(rows)
-            diff = (
-                (
-                    game_losses(rows.p, rows.won).log_loss.mean()
-                    - game_losses(rows.market_p, rows.won).log_loss.mean()
+        for probability in ("p", "p_blend"):
+            for kind in ("series", "map"):
+                rows = frame[frame.kind == kind] if not frame.empty else frame
+                if probability == "p_blend":
+                    rows = rows[rows.blend_fitted]
+                stats = summarize(rows, probability=probability)
+                diff = (
+                    (
+                        game_losses(rows[probability], rows.won).log_loss.mean()
+                        - game_losses(rows.market_p, rows.won).log_loss.mean()
+                    )
+                    if not rows.empty
+                    else None
                 )
-                if not rows.empty
-                else None
-            )
-            cells.extend(
-                [
-                    f"{diff:.6f}" if diff is not None else "—",
-                    f"{stats['flat_roi']:.2%}" if stats["bets"] else "—",
-                    f"${stats['bankroll']:.2f}",
-                ]
-            )
+                cells.extend(
+                    [
+                        f"{diff:.6f}" if diff is not None else "—",
+                        f"{stats['flat_roi']:.2%}" if stats["bets"] else "—",
+                        f"${stats['bankroll']:.2f}",
+                    ]
+                )
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
@@ -318,6 +327,7 @@ def main(argv=None):
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument("--k-grid", help="optional K grid override for every model")
     parser.add_argument("--score-from", default="2023-01-01")
+    parser.add_argument("--blend-min", type=int, default=100)
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
@@ -332,11 +342,15 @@ def main(argv=None):
         ):
             raise ValueError
         score_start = pd.Timestamp(args.score_from, tz="UTC")
-        if score_start >= pd.Timestamp(HOLDOUT_START, tz="UTC") or args.jobs < 1:
+        if (
+            score_start >= pd.Timestamp(HOLDOUT_START, tz="UTC")
+            or args.jobs < 1
+            or args.blend_min < 1
+        ):
             raise ValueError
     except (ValueError, TypeError):
         parser.error(
-            "use positive finite K values, --jobs >= 1 and --score-from before 2026-07-01"
+            "use positive finite K values, --jobs >= 1, --blend-min >= 1 and --score-from before 2026-07-01"
         )
     requested = [name.strip() for name in args.models.split(",")]
     if any(name not in MODELS for name in requested):
@@ -443,6 +457,14 @@ def main(argv=None):
             "runs its own $50 path. Drawdown uses settled match balances. Flat stakes are $1 all-in "
             "per bet; ROI intervals resample whole matches 2,000 times, seed 0.",
         ]
+        blended_markets, monthly_fits = {}, {}
+        for name in detailed:
+            source = winners[name]
+            source = source[pd.to_datetime(source.start_utc, utc=True) >= score_start]
+            market = kalshi_rows(conn, source, series_rows(source), data_dir())
+            blended_markets[name], monthly_fits[name] = walk_forward(
+                market, args.score_from, args.blend_min
+            )
         windows = [("Tuning", False)]
         if args.holdout:
             windows.append(("Holdout", True))
@@ -484,10 +506,10 @@ def main(argv=None):
                         )
                     )
             markets = {
-                name: kalshi_rows(
-                    conn, selected[name], series_rows(selected[name]), data_dir()
-                )
-                for name in detailed
+                name: scored_rows(frame, args.score_from, holdout)
+                if not frame.empty
+                else frame
+                for name, frame in blended_markets.items()
             }
             if not holdout:
                 top_summary = summary_table(markets)
@@ -504,6 +526,34 @@ def main(argv=None):
                         "#### Log loss vs Kalshi",
                         loss_table,
                         "#### Full-Kelly returns",
+                        bet_table,
+                    ]
+                )
+                excluded = int((~market.blend_fitted).sum())
+                loss_table, bet_table = market_tables(market, probability="p_blend")
+                fits = monthly_fits[name]
+                fit_lines = [
+                    "| Month | Kind | n | a | b | Status |",
+                    "|---|---|---:|---:|---:|---|",
+                ]
+                for row in fits.itertuples(index=False):
+                    fit_lines.append(
+                        f"| {row.month} | {row.kind} | {row.n} | {row.a:.6f} | {row.b:.6f} | "
+                        + ("fitted |" if row.fitted else "unfitted |")
+                    )
+                report.extend(
+                    [
+                        "#### Monthly market blend fits",
+                        f"UTC monthly fits use earlier rows of the same kind from {args.score_from}, "
+                        f"excluding holdout; minimum {args.blend_min} rows. "
+                        "logit(p_blend) = a·logit(mid) + b·(logit(p_model) − logit(mid)); "
+                        "inputs clipped to [0.01, 0.99], no intercept, ridge 1e-6. "
+                        f"Unfitted rows use mid unchanged; excluded from blended tables: {excluded} rows. "
+                        "Rating parameters remain selected on the tuning window.",
+                        "\n".join(fit_lines),
+                        "#### Log loss vs Kalshi (blended)",
+                        loss_table,
+                        "#### Full-Kelly returns (blended)",
                         bet_table,
                     ]
                 )
