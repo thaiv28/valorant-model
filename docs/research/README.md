@@ -4,6 +4,13 @@ Every model idea tested, adopted or not, newest first, with its numbers. Rules: 
 
 ## Two-stage runs
 
+**Holdout (opened once, 2026-10-29)**: 2026-07-01 – 2026-10-28, 1,663 maps / 653 matches, frozen stage-1 parameters and June blend fits. Report: [`docs/elo_holdout.md`](../elo_holdout.md).
+
+- **Outcomes:** `tier_revert` map log loss 0.6503 (old model 0.6508, team Elo 0.6697, coin 0.6931); series 0.6269 (0.6257, 0.6527).
+- **Vs Kalshi, raw:** series +0.009 (n.s.; international +0.061 significant), maps +0.0005: no edge, versus −0.009 / −0.011 on stage 2. VCL is the exception: maps −0.022 and series −0.039 (maps significant).
+- **Vs Kalshi, blended:** series −0.005, maps −0.004 (n.s.); VCL significant on both.
+- **Returns (fees, LoL caps, depth-capped):** raw series+map +8.6% [−5.3, +22.8], $50 → $113; blended series +17.0% [+1.0, +33.7], $50 → $127 (domestic +21.0% [+2.5, +40.3]); maps −3.6% (65 of 603 fill). International series lose in every view.
+
 **Full crawl (2026-10-29)** (VLR from 2021, 28,770 matches): seed 2021–2022, stage 1 2023-01-01 – 2025-08-31 (25,649 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps). Supersedes the partial runs below. Report: [`docs/elo_backtest.md`](../elo_backtest.md).
 
 - **Series momentum chain (2026-10-29): rejected.** Previous-map winner gets +m on the logit; stage-1 MLE m = 0.20. Series log loss vs temperature only: m + T stage 1 +0.000005, stage 2 +0.00016 [+0.00003, +0.00030]; m alone worse (+0.006). Pre-match slot odds for later maps worse (+0.0016 [+0.0008, +0.0025]). The temperature already absorbs the map-to-map dependence. `scripts/series_odds.py`; `--series-momentum` off.

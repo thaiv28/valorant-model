@@ -8,6 +8,8 @@ from promval.ratings.regions import macro_region
 from promval.ratings.rounds import map_win
 
 TIER_RANKS = {"collegiate": 0, "t3": 1, "vcl": 2, "vct": 3}
+# Reversion tiers: ranked sections plus Game Changers (its own pool, no rank).
+REVERT_TIERS = {*TIER_RANKS, "gc"}
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class EloModel:
         season_revert=0.0,
         season_month=1,
         inactive_half_life=0.0,
+        revert_target="init",
     ):
         if unit not in {"team", "player"} or credit not in {
             "binary",
@@ -101,6 +104,11 @@ class EloModel:
         self.season_revert, self.season_month = season_revert, season_month
         self.inactive_half_life = inactive_half_life
         self.last_played = {}
+        if revert_target not in {"init", "tier"}:
+            raise ValueError("unknown revert_target")
+        # Tier target: running rating sums by each player's latest ranked section.
+        self.revert_target = revert_target
+        self.tier_of, self.tier_sum, self.tier_count = {}, {}, {}
         if map_unit not in {"player", "team"} or not all(
             isfinite(v) and v >= 0 for v in (map_k, pick_bonus)
         ):
@@ -190,7 +198,19 @@ class EloModel:
         if self.inactive_half_life:
             days = (date - previous).total_seconds() / 86400
             factor *= 0.5 ** (days / self.inactive_half_life)
-        return rating if factor == 1 else self.init + factor * (rating - self.init)
+        if factor == 1:
+            return rating
+        target = self.init
+        section = self.tier_of.get(player)
+        if section is not None:
+            target = self.tier_sum[section] / self.tier_count[section]
+        return target + factor * (rating - target)
+
+    def _set_rating(self, player, value):
+        section = self.tier_of.get(player)
+        if section is not None:
+            self.tier_sum[section] += value - self.ratings[player]
+        self.ratings[player] = value
 
     def _effective_rating(self, player, rank, date=None):
         rating = self._rating(player, date)
@@ -294,9 +314,16 @@ class EloModel:
     def update(self, row):
         played = self._reversion_date(row)
         if played is not None:
-            for player in dict.fromkeys((*self._units(row, 1), *self._units(row, 2))):
-                if player in self.ratings:
-                    self.ratings[player] = self._rating(player, played)
+            # Compute every reverted value before committing: targets read the sums.
+            reverted = {
+                player: self._rating(player, played)
+                for player in dict.fromkeys(
+                    (*self._units(row, 1), *self._units(row, 2))
+                )
+                if player in self.ratings
+            }
+            for player, value in reverted.items():
+                self._set_rating(player, value)
         a, b, home_a, home_b, expected = self._state(row, revert=False)
         error = self.score(row) - expected
         delta = self.k * error
@@ -324,7 +351,7 @@ class EloModel:
                         self.rd_floor**2, 1 / (1 / variance + information)
                     )
                     self.last_seen[player] = date
-                self.ratings[player] += change * weight
+                self._set_rating(player, self.ratings[player] + change * weight)
                 if played is not None:
                     self.last_played[player] = played
         map_name = getattr(row, "map", None)
@@ -351,6 +378,20 @@ class EloModel:
             team = getattr(row, f"team{side}_id")
             if self.unit == "player":
                 self.last_lineups[team] = units
+                section = getattr(row, "section", None)
+                if self.revert_target == "tier" and section in REVERT_TIERS:
+                    for player in units:
+                        previous = self.tier_of.get(player)
+                        if previous == section:
+                            continue
+                        if previous is not None:
+                            self.tier_sum[previous] -= self.ratings[player]
+                            self.tier_count[previous] -= 1
+                        self.tier_of[player] = section
+                        self.tier_sum[section] = (
+                            self.tier_sum.get(section, 0.0) + self.ratings[player]
+                        )
+                        self.tier_count[section] = self.tier_count.get(section, 0) + 1
                 for player in units:
                     if self.rookie_penalty:
                         self.map_counts[player] = self.map_counts.get(player, 0) + 1

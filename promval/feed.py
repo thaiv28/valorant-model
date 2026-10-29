@@ -25,7 +25,7 @@ from promval.vlr.parse import ParseError, parse_schedule_page, parse_upcoming_ma
 
 REPO = Path(__file__).resolve().parents[1]
 STATE_VERSION = 1
-MODEL = "player_round_glicko_rookie"
+MODEL = "player_round_glicko_rookie_tier_revert"
 SECTIONS = {
     "INTL": "International",
     "VCT": "VCT",

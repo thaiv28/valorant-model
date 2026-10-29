@@ -2,7 +2,7 @@
 
 ## Status
 
-2026-10-29: VLR backfill complete (2021 on, 28,770 matches). Model: `player_round_glicko_rookie` (player Glicko-style RD, round credit, rookie discount 200/400 maps) with a stage-1 series temperature; parameters in `promval/ratings/elo_weights.json`. Two-stage benchmark run on the full crawl ([report](../elo_backtest.md), [ledger](../research/README.md)); holdout (July 2026 on) unopened.
+2026-10-29: VLR backfill complete (2021 on, 28,770 matches). Model: `player_round_glicko_rookie_tier_revert` (player Glicko-style RD, round credit, rookie discount 200/400 maps, 20% pull toward the tier mean each Nov 1) with a stage-1 series temperature; parameters in `promval/ratings/elo_weights.json`. Two-stage benchmark run on the full crawl ([report](../elo_backtest.md), [ledger](../research/README.md)); holdout opened 2026-10-29 ([report](../elo_holdout.md)): raw model ≈ Kalshi; blended domestic series the only positive result.
 
 - Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (scheduled every 6 h; secrets/variable are set, raw S3 seeding required). The first full backfill was started 2026-10-28.
 - Site feed: hourly `refresh-db.yml` saves ratings to S3; `feed.yml` publishes DB-free snapshots every 10 minutes via cron-job.org dispatch (GitHub schedule backup). `promval feed-state` / `export --state` retain frozen calls and Kalshi prices; `--no-fetch` builds offline. Workflows await GitHub validation; runner times unmeasured; seed raw S3 cache once. Freshness follows the last crawl and DB rebuild; same-day results await ingestion, and TBD teams are omitted.
@@ -20,6 +20,6 @@
 ## Future work
 
 - Map strength, pick bonus and momentum were tested and rejected (ledger); a veto model is not worth building on that evidence.
-- Open the July 2026+ holdout once, after the model is frozen (ask the user first).
+- New model ideas need a fresh forward window (from 2026-10-29); the July–Oct 2026 holdout is spent.
 - Review unlinked Kalshi events; two matches (8 markets) settle differently on Kalshi and VLR.
 - bo3.gg is not used: its robots.txt disallows `/api/`; Kalshi's own settled results cross-check VLR instead.
