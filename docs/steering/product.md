@@ -10,6 +10,10 @@ Price Valorant matches before each map well enough to beat Kalshi's prices after
 - `KXVALORANTMAP`: map winner by slot ("map 1", "map 2"). Listed from Feb 2026, about two days before the match, so before the veto. Maps 3–4 are rarely listed. An unplayed map settles at the fair market price.
 - Tiers traded: tier 1, Challengers/VCL, Ascension, Game Changers and third-party events.
 
+## Where the edge comes from
+
+From a better rating model, as in Prometheus: not from speed. Kalshi's map prices react to the veto immediately, so post-veto latency is not an edge to pursue.
+
 ## Model (planned)
 
 1. Player-based round Elo: ratings belong to players and update on round share; Glicko-style uncertainty; region offsets linked by international and third-party events.

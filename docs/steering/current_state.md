@@ -16,7 +16,6 @@
 ## Future work
 
 - Schedule the Kalshi collector (storage needs a decision: S3 via the infrastructure repo, or local).
-- Run `promval kalshi books --every 30` around match starts to time the veto window.
 - Run the VLR backfill (`promval vlr crawl --since 2021-01-01 --full`); add event tiers and team aliases.
 - bo3.gg cross-check; Liquipedia rosters and map pool.
 - Elo v1 and the benchmark harness (design plan Phase 2).
