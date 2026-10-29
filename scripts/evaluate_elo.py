@@ -124,8 +124,42 @@ def series_rows(maps):
         & first.series_won.notna()
     ].copy()
     first["p"] = [series_probability(p, int(n)) for p, n in zip(first.p, first.best_of)]
+    if "series_t" in first:
+        # Stage-1 temperature per best-of: independent-map odds run too extreme.
+        first["p"] = temper(first.p, first.series_t)
     first["won"] = first.series_won.astype(int)
     return first
+
+
+def temper(p, t):
+    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
+    return 1 / (1 + np.exp(-np.asarray(t, dtype=float) * np.log(p / (1 - p))))
+
+
+TEMPERATURE_GRID = np.round(np.arange(0.40, 1.501, 0.01), 2)
+
+
+def fit_series_temperature(stage1_maps, min_rows=30):
+    """{best_of: T} minimizing stage-1 series log loss of σ(T·logit p); Bo1 stays 1."""
+    rows = series_rows(stage1_maps.drop(columns="series_t", errors="ignore"))
+    temperatures = {1: 1.0}
+    for best_of, group in rows.groupby("best_of"):
+        best_of = int(best_of)
+        if best_of == 1 or len(group) < min_rows:
+            temperatures[best_of] = 1.0
+            continue
+        losses = [
+            game_losses(temper(group.p, t), group.won).log_loss.mean()
+            for t in TEMPERATURE_GRID
+        ]
+        temperatures[best_of] = float(TEMPERATURE_GRID[int(np.argmin(losses))])
+    return temperatures
+
+
+def with_series_temperature(frame, temperatures):
+    frame = frame.copy()
+    frame["series_t"] = frame.best_of.map(temperatures).fillna(1.0)
+    return frame
 
 
 def kalshi_rows(conn, maps, series, directory, rule=PRESTART):
@@ -512,6 +546,12 @@ def main(argv=None):
     parser.add_argument("--depth-share", type=float, default=0.5)
     parser.add_argument("--robustness", action="store_true")
     parser.add_argument("--series-check", action="store_true")
+    parser.add_argument(
+        "--series-temperature",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fit a stage-1 temperature per best-of on series odds (default on)",
+    )
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
@@ -621,6 +661,15 @@ def main(argv=None):
             name: replay(maps, MODELS[name](lineups=lineups, **best_params[name]))
             for name in names
         }
+        temperatures = {}
+        if args.series_temperature:
+            for name in names:
+                temperatures[name] = fit_series_temperature(
+                    scored_rows(winners[name], args.tune_from, args.tune_to)
+                )
+                winners[name] = with_series_temperature(
+                    winners[name], temperatures[name]
+                )
         base_detailed = detailed.copy()
         for name in base_detailed:
             for layer_name in layer_names:
@@ -630,6 +679,12 @@ def main(argv=None):
                 adjusted["p"] = layer.apply(adjusted)
                 variant = f"{name}+{layer_name}"
                 adjusted.attrs["layer_description"] = layer.describe()
+                if args.series_temperature:
+                    stage1 = scored_rows(winners[name], args.tune_from, args.tune_to)
+                    stage1["p"] = layer.apply(stage1)
+                    temperatures[variant] = fit_series_temperature(stage1)
+                    adjusted = with_series_temperature(adjusted, temperatures[variant])
+                    adjusted.attrs["layer_description"] = layer.describe()
                 winners[variant] = adjusted
                 detailed.append(variant)
         coin = replay(maps, MODELS["coin"]())
@@ -637,6 +692,16 @@ def main(argv=None):
         unknown = sum(macro_region(code) is None for code in maps.region)
         report = [
             "# Elo variants benchmark",
+            (
+                "Series temperatures (stage 1; p′ = σ(T·logit p), T < 1 pulls odds toward 50%): "
+                + "; ".join(
+                    f"{name} Bo3 {t.get(3, 1.0):.2f}, Bo5 {t.get(5, 1.0):.2f}"
+                    for name, t in temperatures.items()
+                    if name in detailed
+                )
+                if temperatures
+                else "Series temperatures: off."
+            ),
             "Parameters minimize tuning map log loss across all sections. Replay predicts before update; "
             f"Replay starts {args.seed_from or 'at the first map'}. "
             f"Tuning: [{args.tune_from}, {args.tune_to}); validation: "

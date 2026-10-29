@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Stage-1 series temperature
+
+Branch `series-temp`, base `main`. The series check showed independent-map series odds are too extreme (Bo3: 5% predicted → 10% won, 96% → 90%). `evaluate_elo.py` now fits, per model and best-of (Bo3, Bo5; ≥ 30 rows, grid 0.40–1.50), a temperature T on stage-1 series log loss and applies p′ = σ(T·logit p) to every series probability (series metrics, Kalshi series comparison, returns); Bo1 unchanged. Layer variants fit their own T on layered stage-1 rows. `--no-series-temperature` restores the old odds. Result (`rookie+form`): T = 0.79 Bo3, 0.68 Bo5; stage-2 series log loss −0.0050 [−0.0088, −0.0011]. Checks: pytest (261), ruff.
+
 ## 2026-10-29 — Realism and grid results (partial crawl)
 
 Data and docs only. Second two-stage run on 10,027 matches (stage 1 Mar 2024 – Aug 2025). Adopted rookie discount 150 / 200 maps (stage 1 −0.0046, stage 2 −0.0069); kept form (weaker: −0.0015 / −0.0007); rejected multi-stat form (VCT worse). Depth caps leave 307/534 series and 99/675 map bets fillable; filled bets keep positive ROI but Kelly drops from $4,637 to $298. Kalshi's series price sharpens toward the start (model edge only at the early quote). Series odds from independent maps are too extreme (5% → 10%, 96% → 90%). Report committed; ledger updated. Checks: pytest.
