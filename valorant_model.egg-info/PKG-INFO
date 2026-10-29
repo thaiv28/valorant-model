@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: valorant-model
+Version: 0.1.0
+Summary: Pre-map trading model for Valorant esports: round Elo, map and veto models, priced against Kalshi
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: beautifulsoup4>=4.12
+Requires-Dist: lxml>=5.3
+Requires-Dist: typer>=0.17.4
+
+# valorant-model
+
+A pre-map trading model for Valorant esports: player-based round Elo, a map layer and a veto model, priced against Kalshi's Valorant series and map-winner markets. The design is in [docs/design_plan.pdf](docs/design_plan.pdf); agent and contributor guidance is in [AGENTS.md](AGENTS.md).
+
+```bash
+uv sync
+uv run pytest -q
+uv run promval --help
+```

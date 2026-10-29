@@ -1,0 +1,2 @@
+[console_scripts]
+promval = promval.main:app

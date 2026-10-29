@@ -1,0 +1,42 @@
+[project]
+name = "valorant-model"
+version = "0.1.0"
+description = "Pre-map trading model for Valorant esports: round Elo, map and veto models, priced against Kalshi"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "typer>=0.17.4",
+]
+
+[project.scripts]
+promval = "promval.main:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["promval*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "ruff>=0.16",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Same rule set as Prometheus. Ignored: RUF001-003 (deliberate en dashes and minus
+# signs), B905 (zip over sequences known to match) and UP042 (StrEnum printing).
+select = ["E9", "F", "I", "B", "UP", "C4", "PERF", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003", "B905", "RUF005", "PERF401", "UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["promval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
