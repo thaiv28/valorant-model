@@ -539,6 +539,7 @@ def main(argv=None):
                 adjusted = scored_rows(winners[name], args.validate_from, None)
                 adjusted["p"] = layer.apply(adjusted)
                 variant = f"{name}+{layer_name}"
+                adjusted.attrs["layer_description"] = layer.describe()
                 winners[variant] = adjusted
                 detailed.append(variant)
         coin = replay(maps, MODELS["coin"]())
@@ -677,6 +678,7 @@ def main(argv=None):
                 )
             for name, market in markets.items():
                 report.append(f"### {name}: Kalshi comparison and returns")
+                report.append(winners[name].attrs.get("layer_description", ""))
                 if market.empty:
                     report.append("no linked markets (rows: 0)")
                 loss_table, bet_table = market_tables(market)
