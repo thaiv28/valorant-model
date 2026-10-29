@@ -240,11 +240,12 @@ def _orientations(event, match, method, aliases):
     return choices
 
 
-def link(kalshi_events, vlr_matches):
+def link(kalshi_events, vlr_matches, initial_aliases=None):
     """Iterate confident series links, then fuzzy-match and inherit map links.
 
     Matches are dictionaries; optional ``maps`` holds played map dictionaries.
     A map-only catalog supplies a representative event for the absent series.
+    ``initial_aliases`` optionally seeds competitor UUID → team ID from the DB.
     """
     events, matches = list(kalshi_events), list(vlr_matches)
     timed = sorted(
@@ -287,14 +288,23 @@ def link(kalshi_events, vlr_matches):
             else "no team match"
         )
     resolved, evidence = {}, defaultdict(list)
-    aliases = {}
+    aliases = dict(initial_aliases or {})
 
     def learn():
-        return {
+        learned = {
             cid: rows[0][1]
             for cid, rows in evidence.items()
             if len({r[1] for r in rows}) == 1
         }
+        combined = dict(initial_aliases or {})
+        combined.update(learned)
+        for cid, rows in evidence.items():
+            ids = {r[1] for r in rows}
+            if cid in (initial_aliases or {}):
+                ids.add(initial_aliases[cid])
+            if len(ids) > 1:
+                combined.pop(cid, None)
+        return combined
 
     def run_pass(method):
         for key, event in representatives.items():

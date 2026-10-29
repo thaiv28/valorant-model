@@ -11,7 +11,10 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 | `promval/ratings/` | Team Elo, model registry, chronological map replay; optional `elo_weights.json` |
 | `promval/evaluation.py`, `scripts/evaluate_elo.py` | Scoring helpers and offline benchmark report |
 | `tests/test_elo.py`, `tests/test_evaluation.py` | Ratings, leakage, candle formats and synthetic-DB benchmark checks |
-| `promval/main.py` | CLI entry; mounts the `kalshi` and `vlr` command groups |
+| `promval/main.py` | CLI entry: `kalshi`, `vlr`, `export` |
+| `promval/feed.py` | Website feed and frozen prediction log |
+| `tests/test_feed.py` | Offline feed, schedule, freeze and price checks |
+| `promval/kalshi/quotes.py` | Shared benchmark/feed candle quote rules |
 | `promval/kalshi/api.py` | Public HTTP client, pacing, retries and pagination |
 | `promval/kalshi/collect.py` | Raw catalog, trade, candle and book files |
 | `promval/kalshi/cli.py` | Collector, manifest and book-loop commands |
@@ -75,6 +78,10 @@ The numbered DB build loads `kalshi_markets` from `collect.data_dir()/markets/{K
 Candidates start within ±30 hours of the advertised schedule (otherwise open time +24 hours), allowing a one-day slip. Exact → alias → anchor passes repeat until no new link is made, re-deriving aliases from every confident link. Exact matching accepts either the outside name or the alternate inside a trailing parenthetical. Alias matching requires both UUIDs. An anchor requires one exact/aliased team appearing in only one candidate match; the other name must share normalized tokens, match team-code initials/a token, or have difflib similarity ≥0.6. Prefer an exact other-side name present in the window over a looser subteam name; competing matches remain ambiguous. Finally both fuzzy name similarities must reach 0.8, without overriding that preference. Normalization removes accents and generic organization words and equates female/women/GC. Map events inherit their series match (map-only catalogs use a representative map event), then select the played map by order; missing rows are `unplayed`.
 
 Cross-check each linked binary settled market against the series/map winner; skip scalar settlements and unknown winners. `db/link_report.txt` lists unlinked events/unplayed maps with team names, schedule, event name and reason; anchor name mappings; and mismatched tickers with VLR IDs. The linker prints linked/total series and maps, aliases, market agreements/checked and mismatches. Re-runs replace derived rows. The Aug 18–Oct 27, 2026 catalog window linked 194/252 series against 233 cached matches before anchor/variant improvements. Settlement checks agreed on 1256/1264; eight disagreements came from the subsequently fixed VLR map ordering bug. Updated coverage is pending.
+
+## Site feed
+
+`uv run promval export [--out PATH] [--no-fetch]` writes `${PROMVAL_DATA:-data}/feed/valorant.json` in the Prometheus [feed format](../feed-format.md). Sources: chronological DB replay using frozen rookie weights/series temperatures; VLR schedule/header pages (seven-day horizon, at most five listings); Kalshi open series quotes and cached prestart candles. Transient pages live in `data/upcoming/`, cached six hours; live pages always refresh. `--no-fetch` uses pages younger than seven days and omits current quotes. `data/predictions.json` refreshes future calls and freezes them at start; disappeared future calls are deleted. Finals prefer logged calls, otherwise causal replay. Both JSON files replace atomically. No raw-cache writes.
 
 ## Model change rules
 
@@ -152,4 +159,4 @@ Post-model layers (not yet benchmarked on full data):
 
 `causal_features(conn,lineups)` passes over all DB maps in replay order, emitting features before recording each map. Homes count earlier known non-international macro hosts; ties retain the previous home, no history gives None. Form uses earlier stats only, skipping null observations per stat while aging prior weights, including history before the tuning window; future rows never affect earlier features. Each layer instance caches features once; the combination shares its cache. Fits consume only supplied stage-1 outcomes; feature histories continue causally during frozen validation/holdout.
 
-Run `uv run python scripts/evaluate_elo.py --tune-from 2023-01-01 --tune-to 2025-09-01 --validate-from 2025-09-01 --layers none`; flags: `--db`, `--out`, `--models` comma list (default all except coin), `--jobs` (default min(cpu,8)), optional `--k-grid` override, `--seed-from`, `--tune-from`, `--tune-to`, `--validate-from`, `--layers`, `--holdout`, `--write-weights`. Process pool tunes (model,params); summaries print wall time in ≤20 lines. Weights store selected models' parameters and fit date in `ratings/elo_weights.json`. Full-data two-stage benchmark and holdout pending.
+Run `uv run python scripts/evaluate_elo.py --tune-from 2023-01-01 --tune-to 2025-09-01 --validate-from 2025-09-01 --layers none`; flags: `--db`, `--out`, `--models` comma list (default all except coin), `--jobs` (default min(cpu,8)), optional `--k-grid` override, `--seed-from`, `--tune-from`, `--tune-to`, `--validate-from`, `--layers`, `--holdout`, `--write-weights`. Process pool tunes (model,params); summaries print wall time in ≤20 lines. Weights store selected models' parameters, rookie series temperatures and fit date in `ratings/elo_weights.json`. Full-data two-stage benchmark and holdout pending.

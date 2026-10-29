@@ -31,6 +31,29 @@ class Team:
 
 
 @dataclass
+class ScheduleRow:
+    match_id: int
+    status: str
+    name1: str
+    name2: str
+    score1: int | None
+    score2: int | None
+    event: str
+    stage: str
+
+
+@dataclass
+class UpcomingMatch:
+    match_id: int
+    team1: Team
+    team2: Team
+    best_of: int | None
+    start_utc: str
+    event: str
+    event_id: int | None
+
+
+@dataclass
 class VetoStep:
     step: int
     team_tag: str | None
@@ -169,6 +192,75 @@ def parse_results_page(html: str) -> list[ResultRow]:
                     raise ValueError("results match has no day heading")
                 rows.append(ResultRow(int(link[1]), link[2], day))
     return rows
+
+
+def parse_schedule_page(html: str) -> list[ScheduleRow]:
+    """Read scheduled/live matches without interpreting timezone-less times."""
+    soup = BeautifulSoup(html, "lxml")
+    rows = []
+    for node in soup.select("a.match-item[href]"):
+        link = re.fullmatch(r"/(\d+)/[^/?]+/*", node["href"])
+        if not link:
+            continue
+        names = node.select(".match-item-vs-team-name .text-of")
+        scores = node.select(".match-item-vs-team-score")
+        if len(names) != 2 or len(scores) != 2:
+            continue
+        event = node.select_one(".match-item-event")
+        stage = node.select_one(".match-item-event-series")
+        event_name = (
+            " ".join(
+                str(t).strip() for t in event.find_all(string=True, recursive=False)
+            ).strip()
+            if event
+            else ""
+        )
+        rows.append(
+            ScheduleRow(
+                int(link[1]),
+                "live"
+                if _text(node.select_one(".ml-status")).lower() == "live"
+                else "upcoming",
+                *(_text(name) for name in names),
+                *(_number(score, integer=True) for score in scores),
+                event_name,
+                _text(stage),
+            )
+        )
+    return rows
+
+
+def parse_upcoming_match(html: str, match_id: int) -> UpcomingMatch:
+    """Read the header of an upcoming match, rejecting unresolved teams."""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        header = soup.select_one(".match-header")
+        teams = [
+            Team(_text(t.select_one(".wf-title-med")), _id(t, "team"))
+            for t in header.select("a.match-header-link")
+        ]
+        if len(teams) != 2 or any(
+            not team.name or team.name.casefold() == "tbd" for team in teams
+        ):
+            raise ParseError(match_id, "missing or TBD team")
+        event = header.select_one(".match-header-event")
+        stamp = header.select_one(".moment-tz-convert[data-utc-ts]")["data-utc-ts"]
+        start = datetime.fromisoformat(stamp).replace(
+            tzinfo=ZoneInfo("America/New_York")
+        )
+        bo = re.search(r"\bBo(\d+)\b", _text(header))
+        return UpcomingMatch(
+            match_id,
+            *teams,
+            int(bo[1]) if bo else None,
+            start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            _text(event.select_one("div > div")) if event else "",
+            _id(event, "event") if event else None,
+        )
+    except ParseError:
+        raise
+    except Exception as exc:
+        raise ParseError(match_id, f"malformed upcoming match page: {exc}") from exc
 
 
 def _players(game) -> list[PlayerMap]:

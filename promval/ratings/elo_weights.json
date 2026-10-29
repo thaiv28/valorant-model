@@ -11,6 +11,10 @@
     "new_player": "teammates",
     "rookie_penalty": 200,
     "rookie_maps": 400,
-    "fit_through": "2025-08-31"
+    "fit_through": "2025-08-31",
+    "series_temperature": {
+      "3": 0.81,
+      "5": 0.77
+    }
   }
 }

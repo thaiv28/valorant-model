@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Website prediction feed
+
+Branch `game-feed`, base `main`. Added `promval export` for the Prometheus feed: upcoming/live matches, replayed results, section filters and oriented Kalshi current/closing prices. Future calls refresh in `data/predictions.json`, then freeze at start; missing future listings are removed. Upcoming pages use a separate cache; `--no-fetch` is offline. Stored existing series temperatures and retained them on refits; shared candle helpers preserve benchmark behavior. Checks (UV_OFFLINE=1 UV_NO_SYNC=1; plain uv startup panics): pytest 363 passed, Ruff format/check, diff check, real-DB offline export (2,457 finals; 1,287 prices). Observed suite timing: 347 existing tests 66.17s → 363 tests 76.04s; 16 feed tests alone 2.38s. Limits: DB only as fresh as the last crawl + `setup_db`; VLR skips same-day results, so finished matches await a result until ingested; TBD sides omitted. No commits.
+
 ## 2026-10-29 — Rating reversion toward the mean
 
 Branch `revert`, base `main`. Added off-by-default player season/inactivity reversion toward the initial rating, separate update dates, non-mutating prediction calculations, and the fixed-base `player_round_glicko_rookie_revert` grid (40 candidates). Existing defaults retain exact synthetic predictions; RD behavior is unchanged. Tests cover boundaries, UTC offsets, multiplicative decay, teammate initialization, prediction/update agreement, validation and registry parameters with RD on/off. Documented formulas/defaults/grid. Checks: full suite passed (347 tests, 26.20 s); Ruff format/check passed. Benchmark: stage 1 chose a 0.2 pull at Jan 1, no inactivity pull (−0.0006 [−0.0013, −0.0000]); stage 2 −0.0007 (n.s.) with GC significantly worse (+0.0040). Not adopted; left off.
