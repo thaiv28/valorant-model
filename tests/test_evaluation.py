@@ -20,7 +20,7 @@ from promval.evaluation import (
     series_probability,
 )
 from promval.ratings.models import TeamEloModel
-from promval.ratings.replay import load_maps, replay
+from promval.ratings.replay import load_lineups, load_maps, replay
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -143,6 +143,15 @@ def database(tmp_path):
                         8 if won else 13,
                     ),
                 )
+        conn.executemany(
+            "INSERT INTO player_maps(game_id,player_id,team) VALUES (?,?,?)",
+            [
+                (game_id, side * 100 + starter, side)
+                for (game_id,) in conn.execute("SELECT game_id FROM maps")
+                for side in (1, 2)
+                for starter in range(5)
+            ],
+        )
         for competitor, team in (("a", 10), ("b", 20), ("other", 99)):
             conn.execute(
                 "INSERT INTO team_aliases(competitor_id,vlr_team_id) VALUES (?,?)",
@@ -184,7 +193,14 @@ def database(tmp_path):
 def test_load_series_and_market_pairing(database):
     path, data = database
     with sqlite3.connect(path) as conn:
-        maps = replay(load_maps(conn), TeamEloModel())
+        loaded = load_maps(conn)
+        assert loaded.loc[loaded.game_id == 11, ["score1", "score2"]].iloc[
+            0
+        ].tolist() == [13, 8]
+        lineups = load_lineups(conn)
+        assert lineups[11] == (tuple(range(100, 105)), tuple(range(200, 205)))
+        assert set(lineups) == set(loaded.game_id)
+        maps = replay(loaded, TeamEloModel())
         assert list(maps.game_id) == [11, 21, 22, 23, 31, 32, 41, 51]
         assert set(maps[maps.match_id == 3].section) == {"unknown"}
         assert set(maps[maps.match_id == 3].international) == {0}
@@ -211,7 +227,7 @@ def test_load_series_and_market_pairing(database):
         assert benchmark.kalshi_rows(conn, maps, series, data / "kalshi").empty
 
 
-def test_end_to_end_holdout_and_weights(database, tmp_path, monkeypatch):
+def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     path, data = database
     env = dict(os.environ, PROMVAL_DATA=str(data))
     report_path = tmp_path / "report.md"
@@ -224,38 +240,49 @@ def test_end_to_end_holdout_and_weights(database, tmp_path, monkeypatch):
         str(report_path),
         "--k-grid",
         "16,32",
+        "--jobs",
+        "2",
+        "--models",
+        "team_elo,team_round,player_binary_region",
     ]
-    default = subprocess.run(
+    result = subprocess.run(
         command, env=env, text=True, capture_output=True, check=True
     )
     report = report_path.read_text()
     assert "## Holdout" not in report
-    assert "Holdout maps=" not in default.stdout
+    assert "Holdout maps=" not in result.stdout
+    assert "## Leaderboard" in report
     assert "| team_elo | all | 5 |" in report
-    assert "| team_elo | all | 1 |" in report  # one eligible tuning series
-    assert "### Kalshi series" in report and "| all | 1 |" in report
-    assert len(default.stdout.splitlines()) <= 15
-    subprocess.run(
-        command + ["--holdout"], env=env, text=True, capture_output=True, check=True
-    )
-    holdout_report = report_path.read_text()
-    assert "## Holdout" in holdout_report
-    assert "| team_elo | all | 2 |" in holdout_report
-    assert (
-        report.split("## K grid")[1].split("Kalshi:")[0]
-        == holdout_report.split("## K grid")[1].split("Kalshi:")[0]
-    )
-    # Redirect weight output to scratch space; no learned artifact in the checkout.
+    assert "| team_elo | all | 1 |" in report
+    for name in ("team_elo", "team_round", "player_binary_region"):
+        assert f"| {name} |" in report
+        assert f"### Kalshi series: {name}" in report
+        assert f"### Kalshi map: {name}" in report
+    assert "team_round − team_elo (paired log loss)" in report
+    assert "player_binary_region − team_elo (paired log loss)" in report
+    assert "Unknown host-region map rows: 6" in report
+    assert "Total wall time:" in result.stdout
+    assert len(result.stdout.splitlines()) <= 20
+    # Redirect learned artifacts into scratch space, and run imported workers inline.
     monkeypatch.setattr(benchmark, "REPO", tmp_path)
     (tmp_path / "promval/ratings").mkdir(parents=True)
     monkeypatch.setenv("PROMVAL_DATA", str(data))
-    selected = benchmark.main(command[2:] + ["--write-weights"])
+    args = command[2:] + ["--jobs", "1", "--write-weights"]
+    selected = benchmark.main(args)
     weights = json.loads((tmp_path / "promval/ratings/elo_weights.json").read_text())
-    assert weights == {"team_elo": {"k": selected, "fit_through": "2026-06-30"}}
+    assert set(weights) == {"team_elo", "team_round", "player_binary_region"}
+    for name, params in selected.items():
+        assert weights[name] == {**params, "fit_through": "2026-06-30"}
+    # Future rows must not affect the tuning leaderboard or chosen parameters.
+    leaderboard = report.split("## Leaderboard")[1].split("Kalshi uses")[0]
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE maps SET score1=13,score2=1 WHERE match_id>=4")
         conn.execute("DROP TABLE kalshi_links")
-    assert benchmark.main(command[2:] + ["--holdout"]) == selected
+    assert benchmark.main(args) == selected
+    assert (
+        report_path.read_text().split("## Leaderboard")[1].split("Kalshi uses")[0]
+        == leaderboard
+    )
     assert "no linked markets" in report_path.read_text()
 
 
@@ -263,22 +290,48 @@ def test_empty_windows_and_invalid_selection(database, tmp_path, monkeypatch):
     path, data = database
     monkeypatch.setenv("PROMVAL_DATA", str(data))
     with sqlite3.connect(path) as conn:
-        maps = load_maps(conn)
-        tuning = benchmark.scored_rows(maps, "2023-01-01")
-        holdout = benchmark.scored_rows(maps, "2023-01-01", True)
+        tuning = benchmark.scored_rows(load_maps(conn), "2023-01-01")
         assert set(tuning.match_id) == {2, 3}
-        assert set(holdout.match_id) == {4, 5}
-        conn.execute("DELETE FROM maps WHERE match_id >= 4")
-    report = tmp_path / "empty_holdout.md"
-    args = ["--db", str(path), "--out", str(report), "--k-grid", "32", "--holdout"]
-    benchmark.main(args)
-    assert "## Holdout" in report.read_text()
-    assert "| team_elo | all | 0 |" in report.read_text()
+    args = [
+        "--db",
+        str(path),
+        "--out",
+        str(tmp_path / "report.md"),
+        "--models",
+        "team_elo",
+        "--jobs",
+        "1",
+        "--k-grid",
+        "32",
+    ]
     for extra in (
         ["--score-from", "2026-07-01"],
         ["--k-grid", "nan"],
         ["--score-from", "2026-06-30T23:30:00"],
+        ["--models", "nonexistent"],
+        ["--jobs", "0"],
     ):
         with pytest.raises(SystemExit) as error:
             benchmark.main(args + extra)
         assert error.value.code == 2
+
+
+def test_baseline_always_included(database, tmp_path, monkeypatch):
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    selected = benchmark.main(
+        [
+            "--db",
+            str(path),
+            "--out",
+            str(tmp_path / "report.md"),
+            "--models",
+            "team_round",
+            "--jobs",
+            "1",
+            "--k-grid",
+            "32",
+        ]
+    )
+    assert set(selected) == {"team_elo", "team_round"}
+    assert "| coin | all | 5 |" in (tmp_path / "report.md").read_text()

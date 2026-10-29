@@ -4,8 +4,12 @@ import argparse
 import gzip
 import json
 import math
+import os
 import sqlite3
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -22,8 +26,9 @@ from promval.evaluation import (
     series_probability,
 )
 from promval.kalshi.collect import data_dir
-from promval.ratings.models import MODELS
-from promval.ratings.replay import load_maps, replay
+from promval.ratings.models import MODELS, PARAM_GRIDS
+from promval.ratings.regions import macro_region
+from promval.ratings.replay import load_lineups, load_maps, replay
 
 
 def candle_mid(candles, start_utc):
@@ -151,12 +156,12 @@ def metrics_table(frame, model):
     return "\n".join(lines)
 
 
-def comparison_table(frame, other, label):
+def comparison_table(frame, other, label, model="team_elo", by_section=True):
     lines = [
-        f"| Section | Rows | team_elo log loss | {label} log loss | Difference | 95% interval | Significant |",
+        f"| Section | Rows | {model} log loss | {label} log loss | Difference | 95% interval | Significant |",
         "|---|---:|---:|---:|---:|---|---|",
     ]
-    for name, rows in sections(frame):
+    for name, rows in sections(frame) if by_section else [("all", frame)]:
         if rows.empty:
             continue
         model_loss = game_losses(rows.p, rows.won).log_loss
@@ -181,116 +186,202 @@ def scored_rows(frame, score_from, holdout=False):
     return frame[mask & ((dates >= boundary) if holdout else (dates < boundary))]
 
 
+def parameter_grid(model, k_grid=None):
+    grid = dict(PARAM_GRIDS[model])
+    if k_grid is not None and "k" in grid:
+        grid["k"] = k_grid
+    return [dict(zip(grid, values)) for values in product(*grid.values())]
+
+
+def initialize_worker(maps, lineups, score_from):
+    global _WORKER_MAPS, _WORKER_LINEUPS, _WORKER_SCORE_FROM
+    _WORKER_MAPS, _WORKER_LINEUPS, _WORKER_SCORE_FROM = maps, lineups, score_from
+
+
+def tune_candidate(task):
+    """Return just a scalar score, avoiding retention of all candidate replays."""
+    name, params = task
+    candidate = replay(_WORKER_MAPS, MODELS[name](lineups=_WORKER_LINEUPS, **params))
+    tuning = scored_rows(candidate, _WORKER_SCORE_FROM)
+    return name, params, float(game_losses(tuning.p, tuning.won).log_loss.mean())
+
+
+def mean_loss(frame):
+    return float(game_losses(frame.p, frame.won).log_loss.mean())
+
+
 def main(argv=None):
+    started = time.perf_counter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("db/valorant.db"))
     parser.add_argument("--out", type=Path, default=Path("docs/elo_backtest.md"))
-    parser.add_argument("--k-grid", default="16,24,32,40,48,64")
+    parser.add_argument("--models", default=",".join(n for n in MODELS if n != "coin"))
+    parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
+    parser.add_argument("--k-grid", help="optional K grid override for every model")
     parser.add_argument("--score-from", default="2023-01-01")
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
     try:
-        grid = [float(k) for k in args.k_grid.split(",")]
-        if not grid or any(not math.isfinite(k) or k <= 0 for k in grid):
+        k_grid = (
+            None
+            if args.k_grid is None
+            else tuple(float(k) for k in args.k_grid.split(","))
+        )
+        if k_grid is not None and (
+            not k_grid or any(not math.isfinite(k) or k <= 0 for k in k_grid)
+        ):
             raise ValueError
         score_start = pd.Timestamp(args.score_from, tz="UTC")
-        if score_start >= pd.Timestamp(HOLDOUT_START, tz="UTC"):
+        if score_start >= pd.Timestamp(HOLDOUT_START, tz="UTC") or args.jobs < 1:
             raise ValueError
     except (ValueError, TypeError):
-        parser.error("use positive finite K values and --score-from before 2026-07-01")
+        parser.error(
+            "use positive finite K values, --jobs >= 1 and --score-from before 2026-07-01"
+        )
+    requested = [name.strip() for name in args.models.split(",")]
+    if any(name not in MODELS for name in requested):
+        parser.error("unknown model in --models")
+    names = list(dict.fromkeys(["team_elo", *(n for n in requested if n != "coin")]))
     if not args.db.is_file():
         parser.error(f"database does not exist: {args.db}")
     with sqlite3.connect(args.db) as conn:
         maps = load_maps(conn)
         if not args.holdout:
             maps = maps[pd.to_datetime(maps.start_utc, utc=True) < HOLDOUT_START]
+        tuning_maps = scored_rows(maps, args.score_from)
+        if tuning_maps.empty:
+            parser.error("no tuning maps in the requested scoring window")
+        lineups = load_lineups(conn)
+        tasks = [
+            (name, params) for name in names for params in parameter_grid(name, k_grid)
+        ]
+        best_params, losses = {}, {}
+        if args.jobs == 1:
+            initialize_worker(maps, lineups, args.score_from)
+            for name, params, loss in map(tune_candidate, tasks):
+                if name not in losses or loss < losses[name]:
+                    best_params[name], losses[name] = params, loss
+        else:
+            with ProcessPoolExecutor(
+                max_workers=args.jobs,
+                initializer=initialize_worker,
+                initargs=(maps, lineups, args.score_from),
+            ) as pool:
+                for name, params, loss in pool.map(tune_candidate, tasks, chunksize=1):
+                    if name not in losses or loss < losses[name]:
+                        best_params[name], losses[name] = params, loss
+        ranked = sorted(names, key=losses.get)
+        detailed = ["team_elo", *[name for name in ranked if name != "team_elo"][:3]]
+        winners = {
+            name: replay(maps, MODELS[name](lineups=lineups, **best_params[name]))
+            for name in names
+        }
         coin = replay(maps, MODELS["coin"]())
-        candidates, losses = {}, {}
-        for k in grid:
-            candidate = replay(maps, MODELS["team_elo"](k=k))
-            tuning = scored_rows(candidate, args.score_from)
-            if tuning.empty:
-                parser.error("no tuning maps in the requested scoring window")
-            candidates[k] = candidate
-            losses[k] = game_losses(tuning.p, tuning.won).log_loss.mean()
-        best_k = min(grid, key=losses.get)
-        best = candidates[best_k]
-        fit_through = scored_rows(best, args.score_from).start_utc.max()[:10]
+        fit_through = tuning_maps.start_utc.max()[:10]
+        unknown = sum(macro_region(code) is None for code in maps.region)
         report = [
-            "# Elo v1 benchmark",
-            "One global team Elo pool; initial rating 1500, scale 400, binary map wins. "
-            "Replay order: match start (UTC), match ID, map order; predict before update. "
-            "2021–22 seed ratings only. Selection minimizes map log loss over all tuning sections. "
+            "# Elo variants benchmark",
+            "Parameters minimize tuning map log loss across all sections. Replay predicts before update; "
+            "2021–22 seed ratings only. "
             f"Scoring starts {args.score_from}; tuning ends before {HOLDOUT_START}. "
-            "Holdout is scored only with --holdout and never selects K. "
-            "Series use the first map's prediction, independent maps, and an odd best-of; "
-            "missing/even best-of and unknown series results are skipped. "
+            "Holdout is scored only with --holdout and never selects parameters. "
+            "Series use the first map prediction and independent maps in an odd best-of; "
+            "missing/even best-of or unknown results are skipped. "
             "Accuracy gives 0.5 predictions half credit; ECE uses 10 equal-width bins. "
-            "Log loss clips probabilities at 1e-6. "
-            "Paired bootstrap: 2,000 resamples, seed 0, whole matches clustered by match_id. "
-            "Differences are team_elo minus comparator; negative favors Elo. "
-            "Significance means the 95% percentile interval excludes zero. "
+            "Log loss clips probabilities at 1e-6. Paired bootstrap uses 2,000 resamples, "
+            "seed 0, clustered by match_id. Differences are the named model minus its comparator; "
+            "negative favors the model. Significance requires a 95% percentile interval excluding zero. "
             "Tuning scores are selection diagnostics, not independent evidence of improvement.",
-            f"Selected K: {best_k:g}; fit through {fit_through}.",
-            "## K grid (tuning only)\n\n| K | Map log loss |\n|---:|---:|\n"
-            + "\n".join(f"| {k:g} | {losses[k]:.6f} |" for k in grid),
-            "Kalshi: use the last valid hourly bid/ask midpoint ending at or before VLR "
-            "match start; orient to team1 through competitor aliases. One contract per event, "
-            "preferring team1, otherwise complementing team2. Compare on identical rows. "
-            "Like the market quotes, map predictions here are pre-match (the first map's "
-            "chance), so they never use earlier maps of the same match. "
-            "Missing links, aliases or candles are skipped. This measures predictive loss, "
-            "without fees or execution assumptions.",
+            f"Fit through {fit_through}. Unknown host-region map rows: {unknown} (including missing/un).",
+            "## Leaderboard (tuning only)\n\n"
+            "| Model | Best params | Map log loss | Series log loss | Rows |\n"
+            "|---|---|---:|---:|---:|\n"
+            + "\n".join(
+                f"| {name} | {json.dumps(best_params[name], sort_keys=True)} | {losses[name]:.6f} | "
+                f"{mean_loss(series_rows(scored_rows(winners[name], args.score_from))):.6f} | {len(tuning_maps)} |"
+                for name in ranked
+            ),
+            "Kalshi uses the last valid hourly bid/ask midpoint ending at or before match start, "
+            "oriented to team1 using aliases. One contract per event, preferring team1. "
+            "Compare identical rows; map predictions use the first map's pre-match chance. "
+            "Missing links, aliases or candles are skipped; fees and execution are excluded.",
         ]
         windows = [("Tuning", False)]
         if args.holdout:
             windows.append(("Holdout", True))
         for title, holdout in windows:
-            selected = scored_rows(best, args.score_from, holdout)
-            baseline = scored_rows(coin, args.score_from, holdout)
-            model_series = series_rows(selected)
             report.append(f"## {title}")
-            for kind, frame, coin_frame in (
-                ("Maps", selected, baseline),
-                ("Series", model_series, series_rows(baseline)),
-            ):
-                report.extend(
-                    [
-                        f"### {kind}",
-                        metrics_table(frame, "team_elo"),
-                        metrics_table(coin_frame, "coin"),
-                        "team_elo − coin (paired log loss):",
-                        comparison_table(frame, "coin_p", "coin"),
-                    ]
+            selected = {
+                name: scored_rows(frame, args.score_from, holdout)
+                for name, frame in winners.items()
+            }
+            coin_rows = scored_rows(coin, args.score_from, holdout)
+            for kind in ("Maps", "Series"):
+                frames = (
+                    selected
+                    if kind == "Maps"
+                    else {n: series_rows(f) for n, f in selected.items()}
                 )
-            market = kalshi_rows(conn, selected, model_series, data_dir())
-            for kind in ("series", "map"):
-                report.append(f"### Kalshi {kind}")
-                subset = market[market.kind == kind] if not market.empty else market
-                report.append(
-                    "no linked markets (rows: 0)"
-                    if subset.empty
-                    else comparison_table(subset, "market_p", "Kalshi")
-                )
+                coin_frame = coin_rows if kind == "Maps" else series_rows(coin_rows)
+                report.extend([f"### {kind}", metrics_table(coin_frame, "coin")])
+                for name in detailed:
+                    report.append(metrics_table(frames[name], name))
+                    report.append(f"{name} − coin (paired log loss):")
+                    report.append(
+                        comparison_table(frames[name], "coin_p", "coin", name)
+                    )
+                for name in names:
+                    if name == "team_elo":
+                        continue
+                    frame = frames[name].merge(
+                        frames["team_elo"][["game_id", "p"]].rename(
+                            columns={"p": "baseline_p"}
+                        ),
+                        on="game_id",
+                        validate="one_to_one",
+                    )
+                    report.append(f"{name} − team_elo (paired log loss):")
+                    report.append(
+                        comparison_table(
+                            frame, "baseline_p", "team_elo", name, by_section=False
+                        )
+                    )
+            for name in detailed:
+                frame = selected[name]
+                market = kalshi_rows(conn, frame, series_rows(frame), data_dir())
+                for kind in ("series", "map"):
+                    report.append(f"### Kalshi {kind}: {name}")
+                    subset = market[market.kind == kind] if not market.empty else market
+                    report.append(
+                        "no linked markets (rows: 0)"
+                        if subset.empty
+                        else comparison_table(subset, "market_p", "Kalshi", name)
+                    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n\n".join(report) + "\n")
     if args.write_weights:
         path = REPO / "promval/ratings/elo_weights.json"
         path.write_text(
             json.dumps(
-                {"team_elo": {"k": best_k, "fit_through": fit_through}}, indent=2
+                {
+                    name: {**params, "fit_through": fit_through}
+                    for name, params in best_params.items()
+                },
+                indent=2,
             )
             + "\n"
         )
-    print(f"Selected team_elo K={best_k:g}; tuning log loss={losses[best_k]:.6f}")
+    for name in ranked:
+        print(
+            f"{name}: {json.dumps(best_params[name], sort_keys=True)}; tuning map log loss={losses[name]:.6f}"
+        )
     print(
-        f"Tuning maps={len(scored_rows(best, args.score_from))}; fit through {fit_through}"
+        f"Tuning maps={len(tuning_maps)}; fit through {fit_through}; unknown region rows={unknown}"
     )
-    if args.holdout:
-        print(f"Holdout maps={len(scored_rows(best, args.score_from, True))}")
     print(f"Report: {args.out}")
-    return best_k
+    print(f"Total wall time: {time.perf_counter() - started:.2f}s")
+    return best_params
 
 
 if __name__ == "__main__":
