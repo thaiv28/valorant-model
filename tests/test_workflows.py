@@ -78,11 +78,19 @@ def test_feed_storage_and_guarded_dispatch():
         "uv run promval export --state data/feed/state.pkl.gz --out data/feed/valorant.json"
         in text
     )
-    for key in ("state.pkl.gz", "upcoming", "valorant.json.gz"):
+    for key in ("state.pkl.gz", "upcoming", "valorant.json.gz", "candidates.json"):
         assert f"s3://$BUCKET/valorant-model/feed/{key}" in text
     assert "bash scripts/feed_data.sh restore" in text
     assert "bash scripts/feed_data.sh save" in text
     assert "--content-type application/json" in text
+    upload = 'aws s3 cp data/feed/candidates.json "s3://$BUCKET/valorant-model/feed/candidates.json" --content-type application/json --only-show-errors'
+    assert upload in text
+    assert (
+        text.index("name: Upload feed")
+        < text.index(upload)
+        < text.index("name: Dispatch Prometheus")
+    )
+    assert "--acl" not in text
     assert "gzip -9 -c" in text
     assert "HAS_DISPATCH: ${{ secrets.PROMETHEUS_DISPATCH_TOKEN != '' }}" in text
     assert "if: env.HAS_DISPATCH == 'true'" in text

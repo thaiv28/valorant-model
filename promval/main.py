@@ -13,12 +13,22 @@ app.add_typer(vlr_app, name="vlr", help="Crawl and parse VLR.gg matches.")
 
 
 @app.command()
-def export(out: Path | None = None, no_fetch: bool = False, state: Path | None = None):
+def export(
+    out: Path | None = None,
+    no_fetch: bool = False,
+    state: Path | None = None,
+    candidates: Path | None = None,
+):
     """Write Valorant predictions for the Prometheus website."""
     from promval.feed import export as export_feed
     from promval.feed import load_state
 
-    export_feed(out, no_fetch=no_fetch, state=load_state(state) if state else None)
+    export_feed(
+        out,
+        no_fetch=no_fetch,
+        state=load_state(state) if state else None,
+        candidates_path=candidates,
+    )
 
 
 @app.command()
@@ -38,6 +48,14 @@ def feed_state(out: Path | None = None):
     print(
         f"state={out} bytes={out.stat().st_size} elapsed={time.perf_counter() - started:.2f}s"
     )
+
+
+@app.command()
+def blend_artifact(out: Path = Path("promval/blend_artifact.json")):
+    """Freeze monthly blend fits from cached benchmark series."""
+    from promval.trading import export_blend_artifact
+
+    export_blend_artifact(out)
 
 
 if __name__ == "__main__":

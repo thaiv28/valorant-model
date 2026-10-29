@@ -174,7 +174,7 @@ def upcoming_pages(root, now, no_fetch, fetch):
     return matches, listings, skipped
 
 
-def current_prices(aliases, candidates, raw_markets, now):
+def current_prices(aliases, candidates, raw_markets, now, *, linked_markets=None):
     if not candidates or not raw_markets:
         return {}
     rows = [market_row(raw, "KXVALORANTGAME") for raw in raw_markets]
@@ -187,6 +187,15 @@ def current_prices(aliases, candidates, raw_markets, now):
     for result in linked.links:
         if result.match_id is None:
             continue
+        event = event_by_ticker[result.event_ticker]
+        if linked_markets is not None and len(event.markets) == 2:
+            ordered = sorted(
+                zip(event.markets, result.team_ids),
+                key=lambda pair: pair[1] != match_by_id[result.match_id]["team1_id"],
+            )
+            linked_markets[str(result.match_id)] = [
+                raw_by_ticker[market["ticker"]] for market, _ in ordered
+            ]
         options = []
         for market, team in zip(
             event_by_ticker[result.event_ticker].markets, result.team_ids
@@ -387,6 +396,7 @@ def export(
     vlr_fetch=None,
     kalshi_fetch=None,
     db=None,
+    candidates_path=None,
 ):
     """Write and return a feed; existing DB callers build state on demand."""
     started = time.perf_counter()
@@ -503,6 +513,7 @@ def export(
                 )
     close = state["closing_prices"]
     prices = {}
+    linked_markets = {}
     if not no_fetch:
         client = Client(get=kalshi_fetch) if kalshi_fetch else Client()
         markets = list(
@@ -514,7 +525,13 @@ def export(
                 limit=1000,
             )
         )
-        prices = current_prices(state["team_aliases"], candidates, markets, now)
+        prices = current_prices(
+            state["team_aliases"],
+            candidates,
+            markets,
+            now,
+            linked_markets=linked_markets,
+        )
     for mid, match in matches.items():
         match["market"] = (close if match["status"] == "final" else prices).get(mid)
     present = {m["section"] for m in matches.values()}
@@ -533,11 +550,32 @@ def export(
         ],
         "matches": list(matches.values()),
     }
+    from promval.trading import candidates as execution_candidates
+
+    private_rows = [
+        dict(
+            row,
+            international=bool(
+                events.get(upcoming[int(mid)].event_id, {}).get("international", 0)
+            ),
+        )
+        for mid, row in matches.items()
+        if int(mid) in upcoming
+    ]
+    candidate_counts = {}
+    private = execution_candidates(
+        private_rows,
+        linked_markets,
+        now,
+        data_through=state["data_through"],
+        counts=candidate_counts,
+    )
+    atomic_json(candidates_path or root / "feed/candidates.json", private)
     atomic_json(log_path, log)
     atomic_json(out, feed)
     counts = Counter(m["status"] for m in feed["matches"])
     priced = sum(m["market"] is not None for m in feed["matches"])
     print(
-        f"upcoming={counts['upcoming']} live={counts['live']} final={counts['final']} kalshi={priced} skipped={skipped} bytes={out.stat().st_size} elapsed={time.perf_counter() - started:.2f}s"
+        f"upcoming={counts['upcoming']} live={counts['live']} final={counts['final']} kalshi={priced} skipped={skipped} candidates={len(private['matches'])} skipped_candidates={candidate_counts['skipped']} bytes={out.stat().st_size} elapsed={time.perf_counter() - started:.2f}s"
     )
     return feed

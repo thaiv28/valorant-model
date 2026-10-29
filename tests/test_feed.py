@@ -419,6 +419,8 @@ def test_no_fetch_never_uses_injected_network_and_unknown_event(setup):
     assert by_id(result)["section"] == "?"
     assert result["sections"] == [{"key": "?", "label": "Unknown", "major": False}]
     assert by_id(result)["market"] is None
+    private = json.loads((root / "feed/candidates.json").read_text())
+    assert private["matches"] == []
 
 
 def test_upcoming_requires_an_earlier_rated_map(setup):
@@ -487,3 +489,43 @@ def test_snapshot_rejects_incompatible_version(setup):
         ValueError, match=r"Unsupported feed state version 999.*feed-state"
     ):
         load_state(path)
+
+
+def test_private_candidates_share_link_orientation_and_fetches(setup):
+    conn, root = setup
+    markets = []
+    for side in ("A Team", "Nova Esports"):
+        markets.append(
+            {
+                "ticker": f"KXVALORANTGAME-TEST-{side}",
+                "event_ticker": "KXVALORANTGAME-TEST",
+                "status": "active",
+                "yes_sub_title": side,
+                "rules_primary": f"If {side} wins the Test event: A Team vs. Nova Esports Valorant match originally scheduled for Oct 30, 2026 at 5:00 AM EDT",
+                "yes_bid_dollars": "0.60",
+                "yes_ask_dollars": "0.64",
+            }
+        )
+    calls = []
+
+    def kalshi(url):
+        calls.append(url)
+        return {"markets": markets}
+
+    path = root / "private.json"
+    feed = export(
+        db=conn,
+        now=NOW,
+        candidates_path=path,
+        vlr_fetch=lambda url: (
+            listing() if url.endswith("/matches") else "" if "?page=" in url else page()
+        ),
+        kalshi_fetch=kalshi,
+    )
+    assert len(calls) == 1
+    saved = json.loads(path.read_text())["matches"][0]["execution_candidate"]
+    assert saved["raw"]["Nova Esports"] == by_id(feed)["p_series"]
+    assert saved["group"] == "valorant-domestic"
+    assert saved["provenance"]["model"] == "player_round_glicko_rookie_tier_revert"
+    assert saved["start"] == by_id(feed)["start"]
+    assert "international" not in by_id(feed)

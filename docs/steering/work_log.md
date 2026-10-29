@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Game execution inputs
+
+Branch `game-candidates`, base `main`. Added frozen `promval/blend_artifact.json` and atomic private `data/feed/candidates.json`, uploaded to private `valorant-model/feed/candidates.json` for Prometheus's execution Lambda. Shared benchmark row construction preserves quote rules, stage-1 temperatures and orientation. Candidates validate paired rules, names and starts; export both international and domestic groups. Artifact: 7 snapshots; latest November 1, 2026, a=1.069742465, b=0.535410478, n=1263. Checks (UV_OFFLINE=1 UV_NO_SYNC=1; plain uv startup panics): pytest 390 passed in 25.56s versus existing 373 in 27.69s; 16 new trading tests 0.18s; Ruff format/check and diff check passed. Real blend-artifact, feed-state and offline snapshot export passed (5 upcoming, 2,457 finals, 1,287 prices, zero candidates). No network or commits; Prometheus packaging/deployment remains external.
+
 ## 2026-10-29 — refresh-db: save the raw cache before the DB build
 
 Branch `game-feed`, base `main`. The first `refresh-db` run spent 35 min seeding ~1 GB from S3, then timed out (45 min) in the DB build, so the Actions cache was never saved. The raw cache is now saved right after the crawl; on a cache miss, parsed pickles are touched after the S3 download (S3 sets mtimes to upload time, which made valid pickles look older than their raw pages and forced a full reparse); timeout 90 min. Checks: workflow tests (new order guard), YAML parse. Run timing to follow on GitHub.
