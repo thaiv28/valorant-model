@@ -27,3 +27,73 @@ def test_kalshi_manifest_guard_and_upload():
     assert "aws s3 sync data/kalshi" in text
     assert "aws s3 sync s3://" not in text
     assert "--delete" not in text
+
+
+def test_site_workflow_safeguards():
+    for name, cron, timeout in (
+        ("refresh-db", "41 * * * *", 45),
+        ("feed", "7 * * * *", 15),
+    ):
+        text = (WORKFLOW.parent / f"{name}.yml").read_text()
+        assert f'cron: "{cron}"' in text
+        assert "workflow_dispatch:" in text
+        assert "contents: read" in text and "id-token: write" in text
+        assert "if: github.ref == 'refs/heads/main'" in text
+        assert f"group: {name}" in text
+        assert "cancel-in-progress: false" in text
+        assert f"timeout-minutes: {timeout}" in text
+        assert "${{ vars.DATA_BACKUP_BUCKET }}" in text
+        assert "${{ secrets.AWS_ROLE_ARN }}" in text
+        assert "aws-region: us-west-2" in text
+        assert "--delete" not in text
+        assert "shell: bash" in text
+
+
+def test_refresh_db_storage_and_incremental_crawl():
+    text = (WORKFLOW.parent / "refresh-db.yml").read_text()
+    assert "uv run promval vlr crawl --since 2021-01-01" in text
+    assert "--full" not in text
+    assert "bash scripts/setup_db.sh" in text
+    assert "uv run promval feed-state" in text
+    assert "s3://$BUCKET/valorant-model/vlr" in text
+    assert "s3://$BUCKET/valorant-model/kalshi" in text
+    assert "s3://$BUCKET/valorant-model/feed/state.pkl.gz" in text
+    assert '--exclude "books/*"' in text
+    assert "--size-only" in text
+    assert "actions/cache/restore@v4" in text and "actions/cache/save@v4" in text
+    assert text.count("key: raw-${{ github.run_id }}") == 2
+    assert "restore-keys: raw-" in text
+    assert "-newer" in text and "cache-matched-key" in text
+    assert "if: steps.changed.outputs.save == 'true'" in text
+
+
+def test_feed_storage_and_guarded_dispatch():
+    text = (WORKFLOW.parent / "feed.yml").read_text()
+    assert "PROMVAL_DATA" not in text
+    assert "setup_db.sh" not in text
+    assert "run refresh-db first" in text
+    assert (
+        "uv run promval export --state data/feed/state.pkl.gz --out data/feed/valorant.json"
+        in text
+    )
+    for key in ("state.pkl.gz", "upcoming", "valorant.json.gz"):
+        assert f"s3://$BUCKET/valorant-model/feed/{key}" in text
+    assert "bash scripts/feed_data.sh restore" in text
+    assert "bash scripts/feed_data.sh save" in text
+    assert "--content-type application/json" in text
+    assert "gzip -9 -c" in text
+    assert "HAS_DISPATCH: ${{ secrets.PROMETHEUS_DISPATCH_TOKEN != '' }}" in text
+    assert "if: env.HAS_DISPATCH == 'true'" in text
+    assert "GH_TOKEN: ${{ secrets.PROMETHEUS_DISPATCH_TOKEN }}" in text
+    assert "continue-on-error: true" in text
+    assert "gh workflow run games.yml -R thaiv28/Prometheus --ref main" in text
+
+
+def test_feed_data_shell_syntax():
+    import subprocess
+
+    script = WORKFLOW.parents[2] / "scripts/feed_data.sh"
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    text = script.read_text()
+    assert "valorant-model/feed/predictions.json" in text
+    assert "--if-match" in text and "--if-none-match" in text

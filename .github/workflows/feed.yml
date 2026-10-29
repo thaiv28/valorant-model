@@ -1,0 +1,67 @@
+name: Site feed
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7 * * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+jobs:
+  feed:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 15
+    env:
+      BUCKET: ${{ vars.DATA_BACKUP_BUCKET }}
+      HAS_DISPATCH: ${{ secrets.PROMETHEUS_DISPATCH_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --frozen --no-dev
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Download ratings snapshot
+        run: |
+          mkdir -p data/feed
+          if ! aws s3 cp "s3://$BUCKET/valorant-model/feed/state.pkl.gz" data/feed/state.pkl.gz --only-show-errors; then
+            echo "::error::Cannot download ratings snapshot; run refresh-db first"
+            exit 1
+          fi
+      - name: Restore prediction log
+        env:
+          DATA_BACKUP_BUCKET: ${{ env.BUCKET }}
+        run: bash scripts/feed_data.sh restore
+      - name: Restore schedule cache
+        run: aws s3 sync "s3://$BUCKET/valorant-model/feed/upcoming" data/upcoming --only-show-errors
+      - name: Export feed
+        run: |
+          uv run promval export --state data/feed/state.pkl.gz --out data/feed/valorant.json | tee "$RUNNER_TEMP/export.log"
+          tail -n 1 "$RUNNER_TEMP/export.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload feed
+        run: |
+          gzip -9 -c data/feed/valorant.json > data/feed/valorant.json.gz
+          aws s3 cp data/feed/valorant.json.gz "s3://$BUCKET/valorant-model/feed/valorant.json.gz" --content-type application/json --only-show-errors
+      - name: Save prediction log
+        env:
+          DATA_BACKUP_BUCKET: ${{ env.BUCKET }}
+        run: bash scripts/feed_data.sh save
+      - name: Save schedule cache
+        run: aws s3 sync data/upcoming "s3://$BUCKET/valorant-model/feed/upcoming" --only-show-errors
+      - name: Dispatch Prometheus
+        if: env.HAS_DISPATCH == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PROMETHEUS_DISPATCH_TOKEN }}
+        run: gh workflow run games.yml -R thaiv28/Prometheus --ref main

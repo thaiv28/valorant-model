@@ -350,6 +350,20 @@ def test_live_listing_scores_and_closing_candle(setup):
     assert by_id(feed, 2)["market"]["p"] == 0.38
     assert by_id(feed, 2)["market"]["at"] == "2026-10-01T09:00Z"
 
+    from promval.feed import build_state, load_state, save_state
+
+    snapshot = root / "state.pkl.gz"
+    save_state(build_state(conn, root), snapshot)
+    assert (
+        export(
+            state=load_state(snapshot),
+            now=START + timedelta(minutes=10),
+            vlr_fetch=vlr,
+            kalshi_fetch=lambda url: {"markets": []},
+        )
+        == feed
+    )
+
 
 def test_series_temperature_unknown_and_bo1():
     assert series_call(0.7, 1, {"1": 0.2}) == 0.7
@@ -414,3 +428,62 @@ def test_upcoming_requires_an_earlier_rated_map(setup):
     feed = export(db=conn, no_fetch=True, now=NOW)
     assert str(MID) not in {match["match_id"] for match in feed["matches"]}
     assert str(MID) not in json.loads((root / "predictions.json").read_text())
+
+
+def test_snapshot_roundtrip_and_cli_without_db(setup, monkeypatch):
+    from typer.testing import CliRunner
+
+    import promval.feed as feed_module
+    from promval.feed import build_state, load_state, save_state
+    from promval.main import app
+
+    conn, root = setup
+    conn.execute("INSERT INTO team_aliases VALUES ('a', 20603)")
+    cached(root)
+    db_path = root / "synthetic.db"
+    with sqlite3.connect(db_path) as target:
+        conn.commit()
+        conn.backup(target)
+    fetchers = {
+        "vlr_fetch": lambda url: (
+            listing() if url.endswith("/matches") else "" if "?page=" in url else page()
+        ),
+        "kalshi_fetch": lambda url: {"markets": []},
+    }
+    expected = export(db=db_path, now=NOW, **fetchers)
+    path = root / "state.pkl.gz"
+    state = build_state(conn, root)
+    save_state(state, path)
+    restored = load_state(path)
+    assert restored["team_aliases"] == {"a": 20603}
+    assert restored["version"] == 1 and restored["rated_teams"]
+    assert restored["built"].endswith("Z")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Snapshot export must not open a DB")
+
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(
+        feed_module, "export", lambda *a, **kw: export(*a, now=NOW, **fetchers, **kw)
+    )
+    output = root / "snapshot.json"
+    result = CliRunner().invoke(
+        app, ["export", "--state", str(path), "--out", str(output)]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(output.read_text()) == expected
+    # Reusing one state cannot mutate its reconstructed finals.
+    assert export(state=restored, now=NOW, **fetchers) == expected
+    assert export(state=restored, now=NOW, **fetchers) == expected
+
+
+def test_snapshot_rejects_incompatible_version(setup):
+    from promval.feed import load_state, save_state
+
+    _, root = setup
+    path = root / "state.pkl.gz"
+    save_state({"version": 999}, path)
+    with pytest.raises(
+        ValueError, match=r"Unsupported feed state version 999.*feed-state"
+    ):
+        load_state(path)

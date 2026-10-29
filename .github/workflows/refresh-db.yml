@@ -1,0 +1,83 @@
+name: Refresh DB
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 * * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: refresh-db
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
+    env:
+      BUCKET: ${{ vars.DATA_BACKUP_BUCKET }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --frozen --no-dev
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: actions/cache/restore@v4
+        id: raw
+        with:
+          path: |
+            data/vlr
+            data/kalshi
+          key: raw-${{ github.run_id }}
+          restore-keys: raw-
+      - name: Mark raw cache
+        run: |
+          touch "$RUNNER_TEMP/raw-marker"
+          mkdir -p data/vlr data/kalshi
+          find data/vlr data/kalshi -type f -printf '%p %s %T@\n' | sort > "$RUNNER_TEMP/raw-before"
+      - name: Top up raw cache
+        run: |
+          aws s3 sync "s3://$BUCKET/valorant-model/vlr" data/vlr --only-show-errors
+          aws s3 sync "s3://$BUCKET/valorant-model/kalshi" data/kalshi --only-show-errors --exclude "books/*"
+      - name: Crawl
+        run: |
+          uv run promval vlr crawl --since 2021-01-01 | tee "$RUNNER_TEMP/crawl.log"
+          tail -n 1 "$RUNNER_TEMP/crawl.log" >> "$GITHUB_STEP_SUMMARY"
+          aws s3 sync data/vlr "s3://$BUCKET/valorant-model/vlr" --size-only --only-show-errors
+      - name: Build DB
+        run: |
+          started=$SECONDS
+          bash scripts/setup_db.sh
+          echo "DB build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save ratings snapshot
+        run: |
+          uv run promval feed-state | tee "$RUNNER_TEMP/state.log"
+          tail -n 1 "$RUNNER_TEMP/state.log" >> "$GITHUB_STEP_SUMMARY"
+          aws s3 cp data/feed/state.pkl.gz "s3://$BUCKET/valorant-model/feed/state.pkl.gz" --only-show-errors
+      - name: Check raw cache changes
+        id: changed
+        env:
+          RESTORED_KEY: ${{ steps.raw.outputs.cache-matched-key }}
+        run: |
+          changed=$(find data/vlr data/kalshi -newer "$RUNNER_TEMP/raw-marker" -type f -print -quit)
+          # S3 preserves old LastModified times, so also compare file inventories.
+          find data/vlr data/kalshi -type f -printf '%p %s %T@\n' | sort > "$RUNNER_TEMP/raw-after"
+          if [ -n "$changed" ] || [ -z "$RESTORED_KEY" ] || ! cmp -s "$RUNNER_TEMP/raw-before" "$RUNNER_TEMP/raw-after"; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/cache/save@v4
+        if: steps.changed.outputs.save == 'true'
+        with:
+          path: |
+            data/vlr
+            data/kalshi
+          key: raw-${{ github.run_id }}

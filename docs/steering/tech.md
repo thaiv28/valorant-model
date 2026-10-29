@@ -11,8 +11,10 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 | `promval/ratings/` | Team Elo, model registry, chronological map replay; optional `elo_weights.json` |
 | `promval/evaluation.py`, `scripts/evaluate_elo.py` | Scoring helpers and offline benchmark report |
 | `tests/test_elo.py`, `tests/test_evaluation.py` | Ratings, leakage, candle formats and synthetic-DB benchmark checks |
-| `promval/main.py` | CLI entry: `kalshi`, `vlr`, `export` |
-| `promval/feed.py` | Website feed and frozen prediction log |
+| `promval/main.py` | CLI entry: `kalshi`, `vlr`, `feed-state`, `export` |
+| `promval/feed.py` | Versioned ratings snapshot, website feed and frozen prediction log |
+| `scripts/feed_data.sh` | Conditional S3 prediction-log restore/save |
+| `.github/workflows/refresh-db.yml`, `feed.yml` | Hourly snapshot build and DB-free site publication |
 | `tests/test_feed.py` | Offline feed, schedule, freeze and price checks |
 | `promval/kalshi/quotes.py` | Shared benchmark/feed candle quote rules |
 | `promval/kalshi/api.py` | Public HTTP client, pacing, retries and pagination |
@@ -81,7 +83,7 @@ Cross-check each linked binary settled market against the series/map winner; ski
 
 ## Site feed
 
-`uv run promval export [--out PATH] [--no-fetch]` writes `${PROMVAL_DATA:-data}/feed/valorant.json` in the Prometheus [feed format](../feed-format.md). Sources: chronological DB replay using frozen rookie weights/series temperatures; VLR schedule/header pages (seven-day horizon, at most five listings); Kalshi open series quotes and cached prestart candles. Transient pages live in `data/upcoming/`, cached six hours; live pages always refresh. `--no-fetch` uses pages younger than seven days and omits current quotes. `data/predictions.json` refreshes future calls and freezes them at start; disappeared future calls are deleted. Finals prefer logged calls, otherwise causal replay. Both JSON files replace atomically. No raw-cache writes.
+`uv run promval feed-state [--out PATH]` saves `data/feed/state.pkl.gz` (gzip level 6, atomic pickle, version 1). `uv run promval export [--state PATH] [--out PATH] [--no-fetch]` writes `${PROMVAL_DATA:-data}/feed/valorant.json` in the Prometheus [feed format](../feed-format.md). Sources: chronological DB replay using frozen rookie weights/series temperatures; VLR schedule/header pages (seven-day horizon, at most five listings); Kalshi open series quotes and cached prestart candles. Transient pages live in `data/upcoming/`, cached six hours; live pages always refresh. `--no-fetch` uses pages younger than seven days and omits current quotes. `data/predictions.json` refreshes future calls and freezes them at start; disappeared future calls are deleted. Finals prefer logged calls, otherwise causal replay. Both JSON files replace atomically. No raw-cache writes. `--state` opens no DB: replay, final rows, closing quotes and lookups come from the snapshot. Without it, export builds the same state from SQLite.
 
 ## Model change rules
 
