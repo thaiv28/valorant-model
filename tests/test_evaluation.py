@@ -996,3 +996,225 @@ def test_series_temperature_fit_and_apply():
     assert np.allclose(tempered.p, benchmark.temper(untempered.p, temps[3]))
     # Few rows: no temperature.
     assert benchmark.fit_series_temperature(frame.head(10))[3] == 1.0
+
+
+@pytest.mark.parametrize("best_of", [1, 3, 5])
+def test_zero_momentum(best_of):
+    from math import comb
+
+    from promval.evaluation import slot_probabilities
+
+    for p in [0, 0.2, 0.5, 0.7, 1]:
+        expected = sum(
+            comb(best_of, w) * p**w * (1 - p) ** (best_of - w)
+            for w in range(best_of // 2 + 1, best_of + 1)
+        )
+        assert series_probability(p, best_of, 0) == expected
+        assert slot_probabilities(p, best_of) == [p] * best_of
+
+
+def test_momentum_hand_calculation():
+    from promval.evaluation import slot_probabilities
+
+    p, m = 0.6, 0.5
+    a = 1 / (1 + np.exp(-(np.log(p / (1 - p)) + m)))
+    b = 1 / (1 + np.exp(-(np.log(p / (1 - p)) - m)))
+    split_wl, split_lw = p * (1 - a), (1 - p) * b
+    assert series_probability(p, 3, m) == pytest.approx(
+        p * a + split_wl * b + split_lw * a
+    )
+    assert slot_probabilities(p, 3, m) == pytest.approx(
+        [
+            p,
+            p * a + (1 - p) * b,
+            (split_wl * b + split_lw * a) / (split_wl + split_lw),
+        ]
+    )
+    assert slot_probabilities(p, 1, m) == [p]
+    assert 0.7 < series_probability(0.7, 3, m) < series_probability(0.7, 3)
+    for p in [0, 1]:
+        assert series_probability(p, 5, m) == p
+        assert slot_probabilities(p, 5, m) == [p] * 5
+    for function in (series_probability, slot_probabilities):
+        with pytest.raises(ValueError):
+            function(-0.1, 3, m)
+        with pytest.raises(ValueError):
+            function(0.5, 2, m)
+
+
+def test_fit_momentum_planted_first_map_only():
+    from promval.evaluation import fit_momentum
+
+    rng = np.random.default_rng(12)
+    records = []
+    planted = 0.4
+    for match in range(10000):
+        p = rng.uniform(0.2, 0.8)
+        z = np.log(p / (1 - p))
+        wins, losses, previous = 0, 0, None
+        for order in range(1, 6):
+            q = (
+                p
+                if previous is None
+                else 1 / (1 + np.exp(-(z + planted * (2 * previous - 1))))
+            )
+            won = int(rng.random() < q)
+            records.append(
+                {
+                    "match_id": match,
+                    "order": order,
+                    "p": p if order == 1 else 0.99,
+                    "won": won,
+                }
+            )
+            wins += won
+            losses += 1 - won
+            previous = won
+            if max(wins, losses) == 3:
+                break
+    frame = pd.DataFrame(records).sample(frac=1, random_state=1)
+    fitted = fit_momentum(frame)
+    assert fitted == pytest.approx(planted, abs=0.05)
+    changed = frame.copy()
+    changed.loc[changed.order >= 2, "p"] = 0.01
+    assert fit_momentum(changed) == fitted
+    assert fit_momentum(frame.head(99)) == 0.0
+    assert fit_momentum(frame[frame.order != 1]) == 0.0
+    # With only slots 1 and 3, there are no adjacent eligible observations.
+    assert fit_momentum(frame[frame.order.isin([1, 3])]) == 0.0
+
+
+def test_momentum_series_and_kalshi_slots(database):
+    from promval.evaluation import slot_probabilities
+
+    path, data = database
+    with sqlite3.connect(path) as conn:
+        maps = replay(load_maps(conn), TeamEloModel())
+        independent = benchmark.series_rows(maps)
+        zero = benchmark.series_rows(maps.assign(series_m=0.0))
+        assert np.array_equal(independent.p, zero.p)
+        base = benchmark.kalshi_rows(conn, maps, independent, data / "kalshi")
+        unchanged = benchmark.kalshi_rows(
+            conn, maps.assign(series_m=0.0), zero, data / "kalshi"
+        )
+        assert np.array_equal(base.p, unchanged.p)
+        momentum = maps.assign(series_m=0.5)
+        series = benchmark.series_rows(momentum)
+        market = benchmark.kalshi_rows(conn, momentum, series, data / "kalshi")
+        p0 = maps[maps.game_id == 21].p.iloc[0]
+        assert series[series.match_id == 2].p.iloc[0] == pytest.approx(
+            series_probability(p0, 3, 0.5)
+        )
+        assert market[market.kind == "map"].p.iloc[0] == pytest.approx(
+            slot_probabilities(p0, 3, 0.5)[1]
+        )
+        assert market[market.kind == "map"].p.iloc[0] != p0
+
+
+def test_momentum_benchmark_cli(database, tmp_path, monkeypatch, capsys):
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    calls = []
+    original = benchmark.kalshi_rows
+
+    def capture(conn, maps, series, directory, rule=benchmark.PRESTART):
+        calls.append(maps.copy())
+        return original(conn, maps, series, directory, rule)
+
+    monkeypatch.setattr(benchmark, "kalshi_rows", capture)
+    monkeypatch.setattr(benchmark, "fit_momentum", lambda frame: 0.5)
+    out = tmp_path / "momentum.md"
+    benchmark.main(
+        [
+            "--db",
+            str(path),
+            "--out",
+            str(out),
+            "--models",
+            "team_elo",
+            "--report-models",
+            "team_elo",
+            "--jobs",
+            "1",
+            "--k-grid",
+            "16",
+            "--tune-from",
+            "2022-01-01",
+            "--tune-to",
+            "2023-01-01",
+            "--validate-from",
+            "2023-01-01",
+            "--quote",
+            "prestart",
+            "--series-momentum",
+        ]
+    )
+    assert "Series momentum (stage 1): team_elo m=0.500000" in capsys.readouterr().out
+    assert calls and all((frame.series_m == 0.5).all() for frame in calls)
+    assert "team_elo+none m=0.500000" in out.read_text()
+
+
+def test_series_odds_cli(database, tmp_path):
+    path, _ = database
+    out = tmp_path / "odds.md"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/series_odds.py"),
+            "--db",
+            str(path),
+            "--model",
+            "team_elo",
+            "--tune-from",
+            "2022-01-01",
+            "--tune-to",
+            "2023-01-01",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(result.stdout.splitlines()) <= 20
+    report = out.read_text()
+    for title in [
+        "Stage 1 series log loss",
+        "Stage 2 series log loss",
+        "Stage 1 paired Δ vs T",
+        "Stage 2 paired Δ vs T",
+        "Stage 2 map slots",
+        "Stage 2 Bo3 calibration: T",
+        "Stage 2 Bo3 calibration: m+T",
+    ]:
+        assert title in report
+    for name in [
+        "independent",
+        "T",
+        "m",
+        "m+T",
+        "Bo3",
+        "Bo5",
+        "vct",
+        "vcl",
+        "gc",
+        "international=1",
+    ]:
+        assert f"| {name} |" in report
+    assert "Stage 2 (1 series)" in result.stdout
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/series_odds.py"),
+            "--db",
+            str(path),
+            "--validate-to",
+            "2026-07-02",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "2026-07-01" in rejected.stderr

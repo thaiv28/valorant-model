@@ -21,7 +21,9 @@ from promval.evaluation import (
 )
 
 
-def series_check(maps, start="2025-09-01", end=HOLDOUT_START, n_resamples=2000, seed=0):
+def series_check(
+    maps, start="2025-09-01", end=HOLDOUT_START, n_resamples=2000, seed=0, m=0.0
+):
     """Match-clustered calibration, map-2 dependence and Bo3 decider residuals."""
     ordered = maps.sort_values(["match_id", "order"])
     first = ordered.drop_duplicates("match_id")
@@ -36,7 +38,7 @@ def series_check(maps, start="2025-09-01", end=HOLDOUT_START, n_resamples=2000, 
         valid &= dates < pd.Timestamp(end, tz="UTC")
     first = first.loc[valid].copy()
     first["series_p"] = [
-        series_probability(p, int(n)) for p, n in zip(first.p, first.best_of)
+        series_probability(p, int(n), m) for p, n in zip(first.p, first.best_of)
     ]
     bins, losses = [], {}
     for best_of in (3, 5):
@@ -167,6 +169,7 @@ def main(argv=None):
     parser.add_argument("--from", dest="start", default="2025-09-01")
     parser.add_argument("--to", dest="end", default=HOLDOUT_START)
     parser.add_argument("--out", type=Path, default=Path("docs/series_independence.md"))
+    parser.add_argument("--m", type=float, default=0.0)
     parser.add_argument("--model", default="team_elo")
     parser.add_argument(
         "--params", default="{}", help="Frozen model parameters as JSON; no tuning"
@@ -196,7 +199,7 @@ def main(argv=None):
             maps,
             MODELS[args.model](lineups=load_lineups(conn), **params),
         )
-    result = series_check(predictions, args.start, args.end)
+    result = series_check(predictions, args.start, args.end, m=args.m)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(result["markdown"] + "\n")
     print(result["summary"])

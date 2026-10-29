@@ -6,6 +6,7 @@ Every model idea tested, adopted or not, newest first, with its numbers. Rules: 
 
 **Full crawl (2026-10-29)** (VLR from 2021, 28,770 matches): seed 2021–2022, stage 1 2023-01-01 – 2025-08-31 (25,649 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps). Supersedes the partial runs below. Report: [`docs/elo_backtest.md`](../elo_backtest.md).
 
+- **Series momentum chain (2026-10-29): rejected.** Previous-map winner gets +m on the logit; stage-1 MLE m = 0.20. Series log loss vs temperature only: m + T stage 1 +0.000005, stage 2 +0.00016 [+0.00003, +0.00030]; m alone worse (+0.006). Pre-match slot odds for later maps worse (+0.0016 [+0.0008, +0.0025]). The temperature already absorbs the map-to-map dependence. `scripts/series_odds.py`; `--series-momentum` off.
 - **Rookie discount: adopted 200 / 400 maps** (grids widened both ways; interior choice). Over `player_round_glicko`: stage 1 −0.0071 [−0.0086, −0.0056] (VCL, GC significant), stage 2 −0.0044 [−0.0075, −0.0015] (GC significant); no section worse.
 - **Form layer: dropped.** Stage 1 keeps choosing the longest half-life (5 → 8 → 20 → 80 maps as the grid grew), so it acts as long-run player quality, not form. H = 80: stage 1 −0.0014 [−0.0020, −0.0007], but stage 2 −0.0001 (n.s.) with VCL significantly worse (+0.0018 [+0.0001, +0.0036]); only GC gains (−0.0053).
 - **Regional calibration: rejected.** 1,069 cross-region stage-1 maps; s = 0.89, effects ±0.10 (Americas +0.10, China −0.10); stage 1 −0.0001, stage 2 −0.0002 (n.s.).

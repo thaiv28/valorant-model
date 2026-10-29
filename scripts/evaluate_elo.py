@@ -25,9 +25,11 @@ from promval.blend import walk_forward
 from promval.evaluation import (
     HOLDOUT_START,
     ece,
+    fit_momentum,
     game_losses,
     paired_bootstrap,
     series_probability,
+    slot_probabilities,
 )
 from promval.kalshi.collect import data_dir
 from promval.ratings.layers import LAYERS
@@ -123,7 +125,14 @@ def series_rows(maps):
         & (first.best_of % 2 == 1)
         & first.series_won.notna()
     ].copy()
-    first["p"] = [series_probability(p, int(n)) for p, n in zip(first.p, first.best_of)]
+    first["p"] = [
+        series_probability(p, int(n), m)
+        for p, n, m in zip(
+            first.p,
+            first.best_of,
+            first.get("series_m", pd.Series(0.0, index=first.index)),
+        )
+    ]
     if "series_t" in first:
         # Stage-1 temperature per best-of: independent-map odds run too extreme.
         first["p"] = temper(first.p, first.series_t)
@@ -210,6 +219,15 @@ def kalshi_rows(conn, maps, series, directory, rule=PRESTART):
         candidate = row.to_dict()
         if market.kind == "map":
             candidate["p"] = prematch[market.match_id]
+            if (
+                "series_m" in maps
+                and pd.notna(row.best_of)
+                and row.best_of > 0
+                and row.best_of % 2 == 1
+            ):
+                candidate["p"] = slot_probabilities(
+                    candidate["p"], int(row.best_of), row.series_m
+                )[int(row["order"]) - 1]
         candidate.update(
             match_id=market.match_id,
             kind=market.kind,
@@ -552,6 +570,12 @@ def main(argv=None):
         default=True,
         help="fit a stage-1 temperature per best-of on series odds (default on)",
     )
+    parser.add_argument(
+        "--series-momentum",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="fit a stage-1 previous-map winner logit bonus (default off)",
+    )
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
@@ -661,6 +685,13 @@ def main(argv=None):
             name: replay(maps, MODELS[name](lineups=lineups, **best_params[name]))
             for name in names
         }
+        momentums = {}
+        if args.series_momentum:
+            for name in names:
+                momentums[name] = fit_momentum(
+                    scored_rows(winners[name], args.tune_from, args.tune_to)
+                )
+                winners[name]["series_m"] = momentums[name]
         temperatures = {}
         if args.series_temperature:
             for name in names:
@@ -679,9 +710,14 @@ def main(argv=None):
                 adjusted["p"] = layer.apply(adjusted)
                 variant = f"{name}+{layer_name}"
                 adjusted.attrs["layer_description"] = layer.describe()
-                if args.series_temperature:
+                if args.series_temperature or args.series_momentum:
                     stage1 = scored_rows(winners[name], args.tune_from, args.tune_to)
                     stage1["p"] = layer.apply(stage1)
+                if args.series_momentum:
+                    momentums[variant] = fit_momentum(stage1)
+                    stage1["series_m"] = momentums[variant]
+                    adjusted["series_m"] = momentums[variant]
+                if args.series_temperature:
                     temperatures[variant] = fit_series_temperature(stage1)
                     adjusted = with_series_temperature(adjusted, temperatures[variant])
                     adjusted.attrs["layer_description"] = layer.describe()
@@ -690,8 +726,21 @@ def main(argv=None):
         coin = replay(maps, MODELS["coin"]())
         fit_through = tuning_maps.start_utc.max()[:10]
         unknown = sum(macro_region(code) is None for code in maps.region)
+        momentum_line = (
+            (
+                "Series momentum (stage 1): "
+                + "; ".join(
+                    f"{name} m={m:.6f}"
+                    for name, m in momentums.items()
+                    if name in detailed
+                )
+            )
+            if momentums
+            else "Series momentum: off."
+        )
         report = [
             "# Elo variants benchmark",
+            momentum_line,
             (
                 "Series temperatures (stage 1; p′ = σ(T·logit p), T < 1 pulls odds toward 50%): "
                 + "; ".join(
@@ -707,7 +756,7 @@ def main(argv=None):
             f"Tuning: [{args.tune_from}, {args.tune_to}); validation: "
             f"[{args.validate_from}, {HOLDOUT_START}). "
             "Holdout is scored only with --holdout and never selects parameters. "
-            "Series use the first map prediction and independent maps in an odd best-of; "
+            "Series use the first map prediction and an odd best-of map chain (independent when m=0); "
             "missing/even best-of or unknown results are skipped. "
             "Accuracy gives 0.5 predictions half credit; ECE uses 10 equal-width bins. "
             "Log loss clips probabilities at 1e-6. Paired bootstrap uses 2,000 resamples, "
@@ -796,7 +845,11 @@ def main(argv=None):
                 report.extend(
                     [
                         f"## Series independence: {name}",
-                        series_check(winners[name], args.validate_from)["markdown"],
+                        series_check(
+                            winners[name],
+                            args.validate_from,
+                            m=momentums.get(name, 0.0),
+                        )["markdown"],
                     ]
                 )
         windows = [
@@ -948,8 +1001,10 @@ def main(argv=None):
             + "\n"
         )
     summary_lines = top_summary.splitlines()
-    print("\n".join(summary_lines[:17]))
-    if len(summary_lines) > 17:
+    if momentums:
+        print(momentum_line)
+    print("\n".join(summary_lines[: 16 if momentums else 17]))
+    if len(summary_lines) > (16 if momentums else 17):
         print("Additional models are in the full report.")
     print(f"Report: {args.out}")
     print(f"Total wall time: {time.perf_counter() - started:.2f}s")
