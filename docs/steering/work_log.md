@@ -1,5 +1,9 @@
 # Work log
 
+## 2026-10-29 — refresh-db: no VLR S3 listing on a cache hit
+
+Branch `game-candidates`, base `main`. With the raw Actions cache restored, the VLR `aws s3 sync` still listed and compared ~77k objects (7.5 min of a run). Only this workflow writes them, so the sync now runs only on a cache miss; Kalshi data (written by the collector) still syncs every run. Checks: workflow tests, YAML parse. Timing to confirm on the next run.
+
 ## 2026-10-29 — Refresh speed (requested branch refresh-speed, base main)
 
 Cache built DBs by input inventory and code hash; unchanged hours skip rebuilds when S3 state metadata `inputs=<hash>` matches. Cold raw-cache misses extract `valorant-model/seed/raw.tar.zst` before sync; successful raw-cache saves refresh missing or week-old seeds. Rebuilds publish the walk-forward artifact to `valorant-model/feed/blend_artifact.json`, without changing the committed artifact. Workflow tests cover cache keys, skip guards, uploads and seed guards. Checks: offline no-sync pytest: 393 passed (81.58s); workflow tests: 9 passed (0.06s). Ruff format/check, cached-PyYAML parsing and Bash syntax pass. Standard uv/uvx hit sandbox/runtime errors; checks use offline no-sync and cached PyYAML. Runner timings must be measured after merge. Sandbox blocked Git metadata writes, so fetch/branch creation failed; edits remain in the existing game-feed checkout.

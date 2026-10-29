@@ -60,7 +60,11 @@ jobs:
         env:
           RESTORED_KEY: ${{ steps.raw.outputs.cache-matched-key }}
         run: |
-          aws s3 sync "s3://$BUCKET/valorant-model/vlr" data/vlr --only-show-errors
+          # Only this workflow writes the VLR objects, so a restored cache is current;
+          # listing 77k objects to compare them took 7.5 min.
+          if [ -z "$RESTORED_KEY" ]; then
+            aws s3 sync "s3://$BUCKET/valorant-model/vlr" data/vlr --only-show-errors
+          fi
           aws s3 sync "s3://$BUCKET/valorant-model/kalshi" data/kalshi --only-show-errors --exclude "books/*"
           # S3 sets every mtime to its upload time, which can leave parsed pickles
           # older than their raw pages; they were valid when uploaded, so mark them
