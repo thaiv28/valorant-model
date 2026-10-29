@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Holdout opened
+
+Branch `holdout`, base `main`. Pulled Kalshi from S3, rebuilt the DB, and ran `evaluate_elo.py --holdout` once (July 1 – Oct 28, 2026; 1,663 maps) with frozen stage-1 parameters. `tier_revert` beats team Elo (0.650 vs 0.670 map log loss) but matches Kalshi raw (series +0.009, maps +0.0005, n.s.); blended −0.005 / −0.004 (n.s.), VCL significant. Depth-capped blended series +17.0% [+1.0, +33.7]; maps −3.6%; international series negative. Report `docs/elo_holdout.md`; ledger and current state updated. Checks: pytest. Limit: the holdout is spent; later ideas need a new forward window.
+
 ## 2026-10-29 — Tier-mean reversion adopted
 
 Branch `tier-revert`, base `main`. `revert_target="tier"` pulls a player toward the running mean rating of their latest tier (vct, vcl, gc, t3, collegiate; offseason/unknown keep the previous tier), kept as O(1) per-tier sums. New variant `player_round_glicko_rookie_tier_revert`. Stage 1 chose 0.2 at Nov 1: −0.0007 [−0.0014, −0.0001], no section worse; stage 2 −0.0015 (n.s.; VCL −0.0021 significant; GC +0.0029 n.s.); blended vs Kalshi within 0.0005 of the old model. Adopted; series T now Bo3 0.91, Bo5 0.84. Report and weights rewritten. Caveat: sixth candidate tested on stage 2, proposed after the global version's stage-2 GC result. Checks: pytest, ruff, `evaluate_elo.py`.
