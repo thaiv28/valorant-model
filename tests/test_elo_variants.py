@@ -1,6 +1,7 @@
 import itertools
 import sqlite3
 from copy import deepcopy
+from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
@@ -155,7 +156,7 @@ def test_region_offsets_only_cross_region_and_zero_sum():
 
 
 def test_registry_grids_and_v1_regression():
-    assert len(MODELS) == len(PARAM_GRIDS) == 20
+    assert len(MODELS) == len(PARAM_GRIDS) == 21
     assert "team_binary" not in MODELS
     for name in MODELS:
         if name == "coin":
@@ -695,3 +696,231 @@ def test_load_maps_includes_picker_and_nulls():
         maps = load_maps(conn)
     assert maps["picked_by"].iloc[:2].tolist() == [1, 2]
     assert np.isnan(maps["picked_by"].iloc[2])
+
+
+@pytest.mark.parametrize("rd", [False, True])
+def test_reversion_defaults_exact_regression(rd):
+    options = {
+        "unit": "player",
+        "credit": "round",
+        "rd": rd,
+        "new_player": "teammates",
+        "rookie_penalty": 200,
+        "rookie_maps": 400,
+        "tau": 0.5,
+        "rd_info": 0.25,
+        "lineups": {1: ((1, 2), (3, 4)), 2: ((1, 5), (3, 6))},
+    }
+    model = EloModel(**options)
+    disabled = EloModel(
+        **options, season_revert=0, season_month=11, inactive_half_life=0
+    )
+    # Captured from the implementation before adding reversion.
+    baseline = (
+        [0.5, 0.532058845406047, 0.48554211632936617, 0.449921400610895]
+        if rd
+        else [0.5, 0.5079623073460161, 0.4962283816835553, 0.4884756039130692]
+    )
+    for i, date in enumerate(
+        (
+            "2025-10-01T00:00:00Z",
+            "2025-11-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "2027-01-01T00:00:00Z",
+        )
+    ):
+        game = row(
+            start_utc=date,
+            game_id=1 + i % 2,
+            score1=13 if i % 2 == 0 else 8,
+            score2=11 if i % 2 == 0 else 13,
+            won=int(i % 2 == 0),
+        )
+        assert model.predict(game) == disabled.predict(game) == baseline[i]
+        model.update(game)
+        disabled.update(game)
+        assert model.ratings == disabled.ratings
+        assert model.rd_variance == disabled.rd_variance
+        assert model.last_seen == disabled.last_seen
+    assert model.last_played == disabled.last_played == {}
+
+
+def reversion_model(rd, start="2025-01-01T00:00:00Z", **options):
+    model = EloModel(unit="player", rd=rd, lineups={1: ((1,), (2,))}, **options)
+    model.update(row(start_utc=start))
+    model.ratings = {1: 1700, 2: 1500}
+    return model
+
+
+@pytest.mark.parametrize("rd", [False, True])
+@pytest.mark.parametrize(
+    "date,factor",
+    [
+        ("2025-12-31T23:59:59Z", 1),
+        ("2026-01-01T00:00:00Z", 0.5),
+        ("2027-01-01T00:00:00Z", 0.25),
+    ],
+)
+def test_season_reversion_boundaries(rd, date, factor):
+    model = reversion_model(rd, season_revert=0.5)
+    expected = 1 / (1 + 10 ** (-200 * factor / 400))
+    assert model.predict(row(start_utc=date)) == expected
+
+
+@pytest.mark.parametrize("rd", [False, True])
+@pytest.mark.parametrize(
+    "date,factor",
+    [
+        ("2025-10-31T23:59:59Z", 1),
+        ("2025-11-01T00:00:00Z", 0.5),
+        # The date must be compared in UTC, including offset datetime inputs.
+        (datetime.fromisoformat("2025-10-31T20:00:00-04:00"), 0.5),
+    ],
+)
+def test_november_season_reversion(rd, date, factor):
+    model = reversion_model(rd, season_revert=0.5, season_month=11)
+    assert model.predict(row(start_utc=date)) == 1 / (1 + 10 ** (-200 * factor / 400))
+
+
+@pytest.mark.parametrize("rd", [False, True])
+@pytest.mark.parametrize(
+    "options,date,factor",
+    [
+        ({"inactive_half_life": 365}, "2026-01-01T00:00:00Z", 0.5),
+        (
+            {"inactive_half_life": 365, "season_revert": 0.5},
+            "2026-01-01T00:00:00Z",
+            0.25,
+        ),
+        ({"season_revert": 1}, "2026-01-01T00:00:00Z", 0),
+        ({"season_revert": 1}, "2025-01-01T00:00:00Z", 1),
+        ({"season_revert": 0.5, "inactive_half_life": 365}, "2024-01-01T00:00:00Z", 1),
+    ],
+)
+def test_inactivity_and_combined_reversion(rd, options, date, factor):
+    model = reversion_model(rd, **options)
+    assert model.predict(row(start_utc=date)) == 1 / (1 + 10 ** (-200 * factor / 400))
+
+
+@pytest.mark.parametrize("rd", [False, True])
+@pytest.mark.parametrize("credit", ["binary", "round"])
+def test_reversion_prediction_and_update_agree_without_prediction_history(rd, credit):
+    model = reversion_model(
+        rd,
+        season_revert=0.5,
+        inactive_half_life=365,
+        credit=credit,
+        rookie_penalty=200,
+        move_up_penalty=100,
+    )
+    model.tier_homes = {1: 2, 2: 3}
+    game = row(start_utc=datetime.fromisoformat("2026-01-01T00:00:00Z"), section="vct")
+    before = deepcopy({k: v for k, v in vars(model).items() if isinstance(v, dict)})
+    expected = model._state(game)[-1]
+    prediction = model.predict(game)
+    assert prediction == model.predict(game)
+    assert prediction == pytest.approx(
+        map_win(expected) if credit == "round" else expected
+    )
+    assert {k: v for k, v in vars(model).items() if isinstance(v, dict)} == before
+    # Reversion happens before rookie/move adjustments: effective difference is 50-100.
+    assert expected == 1 / (1 + 10 ** (50 / 400))
+    weight = 4 if rd else 1  # The long gap grows RD back to its cap.
+    model.update(game)
+    delta = model.k * (model.score(game) - expected) * weight
+    assert model.ratings[1] == pytest.approx(1550 + delta)
+    assert model.ratings[2] == pytest.approx(1500 - delta)
+    assert model.last_played == {1: game.start_utc, 2: game.start_utc}
+    # A second map at the same start must not revert again.
+    expected = model._state(game)[-1]
+    previous = model.ratings.copy()
+    weight = model.rd_variance[1] / model.rd_floor**2 if rd else 1
+    model.update(game)
+    assert model.ratings[1] == pytest.approx(
+        previous[1] + model.k * (model.score(game) - expected) * weight
+    )
+
+
+@pytest.mark.parametrize("rd", [False, True])
+def test_reversion_teammates_initialization_and_new_players(rd):
+    model = reversion_model(rd, season_revert=0.5, new_player="teammates")
+    model.lineups[2] = ((1, 3), (2, 4))
+    game = row(game_id=2, start_utc="2026-01-01T00:00:00Z")
+    before_dates = model.last_played.copy()
+    prediction = model.predict(game)
+    assert model.ratings == {1: 1700, 2: 1500, 3: 1600, 4: 1500}
+    assert model.last_played == before_dates
+    assert prediction == 1 / (1 + 10 ** (-100 / 400))
+    # Even far-future predictions do not revert players with no update history.
+    assert model._rating(3, datetime.fromisoformat("2030-01-01T00:00:00Z")) == 1600
+    model.update(game)
+    weight = 4 if rd else 1
+    assert (
+        model.ratings[1]
+        == model.ratings[3]
+        == pytest.approx(1600 + 32 * (1 - prediction) * weight)
+    )
+
+
+def test_team_reversion_options_have_no_effect():
+    model = EloModel(season_revert=1, inactive_half_life=1)
+    baseline = EloModel()
+    for date in ("2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z"):
+        game = row(start_utc=date)
+        assert model.predict(game) == baseline.predict(game)
+        model.update(game)
+        baseline.update(game)
+        assert model.ratings == baseline.ratings
+    assert model.last_played == {}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"season_revert": -0.1},
+        {"season_revert": 1.1},
+        {"season_revert": float("nan")},
+        {"season_revert": float("inf")},
+        {"season_month": 0},
+        {"season_month": 13},
+        {"season_month": 1.5},
+        {"season_month": 1.0},
+        {"season_month": True},
+        {"season_month": float("nan")},
+        {"season_month": float("inf")},
+        {"inactive_half_life": -1},
+        {"inactive_half_life": float("nan")},
+        {"inactive_half_life": float("inf")},
+    ],
+)
+def test_invalid_reversion_parameters(options):
+    with pytest.raises(ValueError, match="reversion"):
+        EloModel(unit="player", **options)
+
+
+def test_reversion_registry_exact_grid_and_adopted_defaults():
+    name = "player_round_glicko_rookie_revert"
+    base = {
+        "k": 32,
+        "tau": 0.5,
+        "rd_new": 280,
+        "rd_info": 0.25,
+        "new_player": "teammates",
+        "rookie_penalty": 200,
+        "rookie_maps": 400,
+    }
+    grid = {key: (value,) for key, value in base.items()}
+    grid.update(
+        season_revert=(0, 0.1, 0.2, 0.35, 0.5),
+        season_month=(1, 11),
+        inactive_half_life=(0, 180, 365, 730),
+    )
+    assert PARAM_GRIDS[name] == grid
+    default = MODELS[name]()
+    assert default.season_revert == default.inactive_half_life == 0
+    assert all(getattr(default, key) == value for key, value in base.items())
+    for params in itertools.product(*grid.values()):
+        options = dict(zip(grid, params))
+        model = MODELS[name](**options)
+        assert model.unit == "player" and model.credit == "round" and model.rd
+        assert all(getattr(model, key) == value for key, value in options.items())

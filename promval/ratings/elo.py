@@ -1,7 +1,7 @@
 """Composable Elo variants and the original binary team Elo reference."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from math import exp, isfinite, log, log1p, tanh
 
 from promval.ratings.regions import macro_region
@@ -76,6 +76,9 @@ class EloModel:
         map_k=0.0,
         map_unit="player",
         pick_bonus=0.0,
+        season_revert=0.0,
+        season_month=1,
+        inactive_half_life=0.0,
     ):
         if unit not in {"team", "player"} or credit not in {
             "binary",
@@ -85,6 +88,19 @@ class EloModel:
             raise ValueError("unknown Elo unit or credit")
         if new_player not in {"fixed", "teammates"}:
             raise ValueError("unknown new_player mode")
+        if (
+            not isfinite(season_revert)
+            or not 0 <= season_revert <= 1
+            or not isinstance(season_month, int)
+            or isinstance(season_month, bool)
+            or not 1 <= season_month <= 12
+            or not isfinite(inactive_half_life)
+            or inactive_half_life < 0
+        ):
+            raise ValueError("invalid player reversion parameters")
+        self.season_revert, self.season_month = season_revert, season_month
+        self.inactive_half_life = inactive_half_life
+        self.last_played = {}
         if map_unit not in {"player", "team"} or not all(
             isfinite(v) and v >= 0 for v in (map_k, pick_bonus)
         ):
@@ -149,8 +165,35 @@ class EloModel:
             return starters
         return self.last_lineups.get(team, (("team", team),))
 
-    def _effective_rating(self, player, rank):
+    def _reversion_date(self, row):
+        if self.unit != "player" or not (self.season_revert or self.inactive_half_life):
+            return None
+        date = row.start_utc
+        if isinstance(date, str):
+            date = datetime.fromisoformat(date)
+        if date.tzinfo is None:
+            return date.replace(tzinfo=UTC)
+        return date.astimezone(UTC)
+
+    def _rating(self, player, date=None):
         rating = self.ratings[player]
+        previous = self.last_played.get(player)
+        if date is None or previous is None or date <= previous:
+            return rating
+        factor = 1.0
+        if self.season_revert:
+            # The season index changes at midnight UTC on the first of the month.
+            seasons = (date.year - (date.month < self.season_month)) - (
+                previous.year - (previous.month < self.season_month)
+            )
+            factor *= (1 - self.season_revert) ** seasons
+        if self.inactive_half_life:
+            days = (date - previous).total_seconds() / 86400
+            factor *= 0.5 ** (days / self.inactive_half_life)
+        return rating if factor == 1 else self.init + factor * (rating - self.init)
+
+    def _effective_rating(self, player, rank, date=None):
+        rating = self._rating(player, date)
         maps = self.map_counts.get(player, 0)
         if self.rookie_penalty and maps < self.rookie_maps:
             rating -= self.rookie_penalty * (1 - log1p(maps) / log1p(self.rookie_maps))
@@ -166,8 +209,8 @@ class EloModel:
             return (getattr(row, f"team{side}_id"),)
         return units
 
-    def _strength(self, units, rank=None):
-        known = [self.ratings[p] for p in units if p in self.ratings]
+    def _strength(self, units, rank=None, date=None):
+        known = [self._rating(p, date) for p in units if p in self.ratings]
         initial = (
             sum(known) / len(known)
             if known and self.new_player == "teammates"
@@ -178,14 +221,20 @@ class EloModel:
         if self.unit == "player" and (
             self.rookie_penalty or self.move_up_penalty or self.move_down_bonus
         ):
-            return sum(self._effective_rating(p, rank) for p in units) / len(units)
-        return sum(self.ratings[p] for p in units) / len(units)
+            return sum(self._effective_rating(p, rank, date) for p in units) / len(
+                units
+            )
+        return sum(self._rating(p, date) for p in units) / len(units)
 
-    def _state(self, row):
+    def _state(self, row, *, revert=True):
         a, b = self._units(row, 1), self._units(row, 2)
         home_a, home_b = self.homes.get(row.team1_id), self.homes.get(row.team2_id)
         rank = TIER_RANKS.get(getattr(row, "section", None))
-        strength_a, strength_b = self._strength(a, rank), self._strength(b, rank)
+        date = self._reversion_date(row) if revert else None
+        strength_a, strength_b = (
+            self._strength(a, rank, date),
+            self._strength(b, rank, date),
+        )
         if self.region_k:
             strength_a += self.offsets.get(home_a, 0)
             strength_b += self.offsets.get(home_b, 0)
@@ -243,7 +292,12 @@ class EloModel:
         }
 
     def update(self, row):
-        a, b, home_a, home_b, expected = self._state(row)
+        played = self._reversion_date(row)
+        if played is not None:
+            for player in dict.fromkeys((*self._units(row, 1), *self._units(row, 2))):
+                if player in self.ratings:
+                    self.ratings[player] = self._rating(player, played)
+        a, b, home_a, home_b, expected = self._state(row, revert=False)
         error = self.score(row) - expected
         delta = self.k * error
         if self.rd:
@@ -271,6 +325,8 @@ class EloModel:
                     )
                     self.last_seen[player] = date
                 self.ratings[player] += change * weight
+                if played is not None:
+                    self.last_played[player] = played
         map_name = getattr(row, "map", None)
         if self.map_k > 0 and isinstance(map_name, str):
             change = self.map_k * error
