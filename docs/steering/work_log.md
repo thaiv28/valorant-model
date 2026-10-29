@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Tier-mean reversion adopted
+
+Branch `tier-revert`, base `main`. `revert_target="tier"` pulls a player toward the running mean rating of their latest tier (vct, vcl, gc, t3, collegiate; offseason/unknown keep the previous tier), kept as O(1) per-tier sums. New variant `player_round_glicko_rookie_tier_revert`. Stage 1 chose 0.2 at Nov 1: −0.0007 [−0.0014, −0.0001], no section worse; stage 2 −0.0015 (n.s.; VCL −0.0021 significant; GC +0.0029 n.s.); blended vs Kalshi within 0.0005 of the old model. Adopted; series T now Bo3 0.91, Bo5 0.84. Report and weights rewritten. Caveat: sixth candidate tested on stage 2, proposed after the global version's stage-2 GC result. Checks: pytest, ruff, `evaluate_elo.py`.
+
 ## 2026-10-29 — Rating reversion toward the mean
 
 Branch `revert`, base `main`. Added off-by-default player season/inactivity reversion toward the initial rating, separate update dates, non-mutating prediction calculations, and the fixed-base `player_round_glicko_rookie_revert` grid (40 candidates). Existing defaults retain exact synthetic predictions; RD behavior is unchanged. Tests cover boundaries, UTC offsets, multiplicative decay, teammate initialization, prediction/update agreement, validation and registry parameters with RD on/off. Documented formulas/defaults/grid. Checks: full suite passed (347 tests, 26.20 s); Ruff format/check passed. Benchmark: stage 1 chose a 0.2 pull at Jan 1, no inactivity pull (−0.0006 [−0.0013, −0.0000]); stage 2 −0.0007 (n.s.) with GC significantly worse (+0.0040). Not adopted; left off.

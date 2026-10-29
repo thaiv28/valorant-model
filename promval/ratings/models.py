@@ -108,3 +108,13 @@ for variant in ("maps", "pick", "revert"):
     )
     if variant == "maps":
         PARAM_GRIDS[name]["map_unit"] = ("player", "team")
+
+# Same reversion, pulled toward the mean of the player's latest ranked tier.
+name = "player_round_glicko_rookie_tier_revert"
+MODELS[name] = partial(
+    MODELS["player_round_glicko_rookie_revert"], revert_target="tier"
+)
+PARAM_GRIDS[name] = PARAM_GRIDS["player_round_glicko_rookie_revert"] | {
+    "season_revert": (0.1, 0.2, 0.35, 0.5),
+    "inactive_half_life": (0,),
+}

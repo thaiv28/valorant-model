@@ -2,7 +2,7 @@
 
 ## Status
 
-2026-10-29: VLR backfill complete (2021 on, 28,770 matches). Model: `player_round_glicko_rookie` (player Glicko-style RD, round credit, rookie discount 200/400 maps) with a stage-1 series temperature; parameters in `promval/ratings/elo_weights.json`. Two-stage benchmark run on the full crawl ([report](../elo_backtest.md), [ledger](../research/README.md)); holdout (July 2026 on) unopened.
+2026-10-29: VLR backfill complete (2021 on, 28,770 matches). Model: `player_round_glicko_rookie_tier_revert` (player Glicko-style RD, round credit, rookie discount 200/400 maps, 20% pull toward the tier mean each Nov 1) with a stage-1 series temperature; parameters in `promval/ratings/elo_weights.json`. Two-stage benchmark run on the full crawl ([report](../elo_backtest.md), [ledger](../research/README.md)); holdout (July 2026 on) unopened.
 
 - Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (scheduled every 6 h once secrets/variable are set and S3 is seeded). The first full backfill was started 2026-10-28.
 - Linking: catalog loader, team matching, learned aliases, map links and settlement cross-checks.
