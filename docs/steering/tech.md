@@ -78,10 +78,29 @@ Cross-check each linked binary settled market against the series/map winner; ski
 
 ## Ratings and benchmark
 
-Built v1: `coin` (0.5) and `team_elo`, one global pool across all tiers. Teams start at 1500; map-win Elo uses scale 400 and binary outcomes, no margin. Predict before updating, replaying by (match start UTC, match_id, map order). Model factories in `ratings/models.py` accept keyword parameters; later increments add registry entries. Series probabilities use the first map's pre-update p and independent maps to first ceil(best_of/2) wins; skip missing/even best-of and unknown series winners.
+Built: `coin` (0.5), v1 `team_elo`, and 11 composable variants `<unit>_<credit>[_region]`; `team_binary` is named `team_elo`. Initial ratings 1500, scale 400. Replay by (match start UTC, match_id, map order), predict before update. Chronologically loaded replays take O(maps); lineup/home history uses bounded work per map. Factories receive `load_lineups` starters; `load_maps` includes round scores and event host/international fields.
 
-2021–22 seed ratings only; score from 2023-01-01. Select K by all-section tuning map log loss from grid 16,24,32,40,48,64, strictly before `HOLDOUT_START = "2026-07-01"`. Holdout scores appear only with `--holdout`, never select K. Sequential holdout updates use only already played maps. Sections: all, events.section (vct/vcl/gc/t3/collegiate/offseason/unknown), international=0/1. Metrics: rows, log loss (clip 1e-6), Brier, accuracy (0.5 picks get half credit), 10-bin ECE. Prometheus's five evaluation helpers are ported with attribution. Paired log-loss differences use 2,000 resamples, seed 0, whole matches clustered by match_id; a 95% interval excluding zero is significant. Tuning comparisons are selection diagnostics.
+Three dimensions:
 
-Kalshi joins links to markets and competitor aliases; skip unresolved teams/missing candles. Read `collect.data_dir()/candles/<TICKER>.json.gz`: last valid hourly candle ending no later than VLR match start, midpoint of yes bid/ask closes (`close_dollars` or historical `close`, both dollars). Orient to VLR team1; one contract per event, prefer team1, otherwise complement team2. Compare Elo and market on identical series/map rows, clustered by match. Map rows use the model's pre-match chance (the first map's p), matching the market's pre-match quote. Missing Kalshi inputs report “no linked markets”. No fees/execution simulation.
+- Credit: binary S=win (1/0); margin winner S=0.5+0.5·tanh(abs(score1−score2)/c), loser 1−S; round S=score1/(score1+score2). Expected e=1/(1+10^(−Δ/400)); all units update ±K·(S−e). Binary/margin predict e. Round predicts σ(τ·logit(map_win(e))); first-to-13 DP, at 12–12 e²/(e²+(1−e)²), cache e rounded to four decimals.
+- Unit: team ID or mean starter rating. Every starter moves equally. New players start fixed at 1500 or at the mean of already-rated teammates (1500 if none). Missing starters use that team's latest earlier lineup, then a namespaced team pseudo-player. Accept any nonempty lineup size.
+- Regions: strength adds the team's home offset. Home is the earlier-map majority of known non-international event hosts; ties retain the previous home. Offsets start zero; only known, differing homes move ±region_k·(S−e). Record the current host after updating, preventing leakage.
 
-Run `uv run python scripts/evaluate_elo.py --db db/valorant.db --out docs/elo_backtest.md`; optional `--k-grid 16,32`, `--score-from 2023-01-01`, `--holdout`, `--write-weights`. Weights save selected K and last tuning date to `promval/ratings/elo_weights.json`; real-DB evaluation has not run here.
+Host country → macro region (`ratings/regions.py`):
+
+| Region | Codes |
+|---|---|
+| Americas | us ca mx br ar cl co pe uy ve py bo ec cr gt pa pr do na latam north-america north_america south-america south_america |
+| EMEA | eu gb de fr es it pt nl be se no dk fi pl cz at ch tr ru ua by kz sa ae eg ma za il gr ro hu rs hr bg ie lt lv ee me mena cis |
+| Pacific | kr jp ph id th vn sg my au nz in tw hk mo kh mm pk bd lk np mn |
+| China | cn |
+
+`sa` means Saudi Arabia; use explicit South America aliases. Other codes (including un/missing) are unknown; benchmark summaries count unknown map rows.
+
+Grids: K={16,24,32,48,64,96}; margin c={4,6,8,12}; round τ={0.4,0.5,0.6,0.8,1}; regional region_k={2,4,8,16} (otherwise 0); players new_player={fixed,teammates}. 2021–22 seed ratings; score from 2023-01-01, select each model by tuning map log loss strictly before `HOLDOUT_START = "2026-07-01"`. Optional holdout never selects parameters. Series use the first map's probability and independent maps; skip missing/even best-of and unknown winners.
+
+Leaderboard: selected params, tuning map/series log loss, map rows, ordered by map loss. Section tables (all, vct/vcl/gc/t3/collegiate/offseason/unknown, international=0/1) cover v1 and three best challengers. Metrics: log loss clipped at 1e-6, Brier, accuracy (0.5 gets half credit), 10-bin ECE. Coin always runs. Paired log-loss differences vs v1 use 2,000 resamples, seed 0, match_id clusters; 95% intervals excluding zero indicate significance. Tuning comparisons are selection diagnostics.
+
+Kalshi compares v1 and the same three challengers on identical linked rows. Use cached candles' last valid hourly yes bid/ask midpoint ending by match start (`close_dollars` or historical `close`, dollars), orient through aliases, prefer team1 contract, complement team2. Map prices use first-map pre-match predictions. Missing links/aliases/candles report “no linked markets”; no fees/execution simulation.
+
+Run `uv run python scripts/evaluate_elo.py`; flags: `--db`, `--out`, `--models` comma list (default all except coin), `--jobs` (default min(cpu,8)), optional `--k-grid` override, `--score-from`, `--holdout`, `--write-weights`. Process pool tunes (model,params); summaries print wall time in ≤20 lines. Weights store selected models' parameters and fit date in `ratings/elo_weights.json`. Full-data benchmark pending (VLR backfill); holdout not run.
