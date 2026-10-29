@@ -16,9 +16,9 @@ From a better rating model, as in Prometheus: not from speed. Kalshi's map price
 
 ## Model
 
-Built: composable binary, margin and round-share credit; team or player units; optional macro-region offsets, alongside v1 team Elo and a coin baseline. The benchmark tunes each variant and compares maps, series and Kalshi pre-match prices with match-clustered intervals. Full-data benchmark validation is pending.
+Built: composable binary, margin and round-share credit; team or player units; optional macro-region offsets, alongside v1 team Elo and a coin baseline. Player RD variants: `player_round_glicko`, `player_round_region_glicko`. The benchmark tunes each variant and compares maps, series and Kalshi pre-match prices with match-clustered intervals. Full-data benchmark validation is pending.
 
-Planned increments: player uncertainty; map strength shrunk for roster continuity; veto-based map-slot and series prices. Calibration and market blending follow validated rating improvements.
+Planned increments: map strength shrunk for roster continuity; veto-based map-slot and series prices. Calibration and market blending follow validated rating improvements.
 
 ## Trading rules
 

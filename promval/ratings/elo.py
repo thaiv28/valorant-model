@@ -1,7 +1,8 @@
 """Composable Elo variants and the original binary team Elo reference."""
 
 from dataclasses import dataclass
-from math import exp, log, tanh
+from datetime import datetime
+from math import exp, isfinite, log, tanh
 
 from promval.ratings.regions import macro_region
 from promval.ratings.rounds import map_win
@@ -50,6 +51,11 @@ class EloModel:
         lineups=None,
         init=1500.0,
         scale=400.0,
+        rd=False,
+        rd_new=280.0,
+        rd_floor=140.0,
+        rd_growth=10.0,
+        rd_info=0.125,
     ):
         if unit not in {"team", "player"} or credit not in {
             "binary",
@@ -61,6 +67,19 @@ class EloModel:
             raise ValueError("unknown new_player mode")
         if k <= 0 or c <= 0 or tau <= 0 or region_k < 0 or scale <= 0:
             raise ValueError("Elo parameters must be positive (region_k may be zero)")
+        self.rd = bool(rd and unit == "player")
+        if self.rd and (
+            not all(isfinite(v) for v in (rd_new, rd_floor, rd_growth, rd_info))
+            or rd_floor <= 0
+            or rd_new < rd_floor
+            or rd_growth < 0
+            or rd_info <= 0
+        ):
+            raise ValueError("invalid player RD parameters")
+        self.rd_new, self.rd_floor = rd_new, rd_floor
+        self.rd_growth, self.rd_info = rd_growth, rd_info
+        self.rd_variance = {}
+        self.last_seen = {}
         self.unit, self.credit = unit, credit
         self.k, self.c, self.tau = k, c, tau
         self.region_k, self.new_player = region_k, new_player
@@ -134,9 +153,31 @@ class EloModel:
         a, b, home_a, home_b, expected = self._state(row)
         error = self.score(row) - expected
         delta = self.k * error
+        if self.rd:
+            date = row.start_utc
+            if isinstance(date, str):
+                date = datetime.fromisoformat(date)
+            information = self.rd_info * (log(10) / self.scale) ** 2
+            information *= expected * (1 - expected)
         for units, change in ((a, delta), (b, -delta)):
             for player in units:
-                self.ratings[player] += change
+                weight = 1.0
+                if self.rd:
+                    variance = self.rd_variance.get(player, self.rd_new**2)
+                    days = (
+                        max(
+                            0.0, (date - self.last_seen[player]).total_seconds() / 86400
+                        )
+                        if player in self.last_seen
+                        else 0.0
+                    )
+                    variance = min(self.rd_new**2, variance + self.rd_growth**2 * days)
+                    weight = variance / self.rd_floor**2
+                    self.rd_variance[player] = max(
+                        self.rd_floor**2, 1 / (1 / variance + information)
+                    )
+                    self.last_seen[player] = date
+                self.ratings[player] += change * weight
         if (
             self.region_k
             and home_a is not None
