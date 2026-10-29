@@ -4,6 +4,14 @@ Every model idea tested, adopted or not, newest first, with its numbers. Rules: 
 
 ## Two-stage runs
 
+**Full crawl (2026-10-29)** (VLR from 2021, 28,770 matches): seed 2021–2022, stage 1 2023-01-01 – 2025-08-31 (25,649 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps). Supersedes the partial runs below. Report: [`docs/elo_backtest.md`](../elo_backtest.md).
+
+- **Rookie discount: adopted 200 / 400 maps** (grids widened both ways; interior choice). Over `player_round_glicko`: stage 1 −0.0071 [−0.0086, −0.0056] (VCL, GC significant), stage 2 −0.0044 [−0.0075, −0.0015] (GC significant); no section worse.
+- **Form layer: dropped.** Stage 1 keeps choosing the longest half-life (5 → 8 → 20 → 80 maps as the grid grew), so it acts as long-run player quality, not form. H = 80: stage 1 −0.0014 [−0.0020, −0.0007], but stage 2 −0.0001 (n.s.) with VCL significantly worse (+0.0018 [+0.0001, +0.0036]); only GC gains (−0.0053).
+- **Regional calibration: rejected.** 1,069 cross-region stage-1 maps; s = 0.89, effects ±0.10 (Americas +0.10, China −0.10); stage 1 −0.0001, stage 2 −0.0002 (n.s.).
+- **Series temperature: kept.** Stage-1 T: Bo3 0.81, Bo5 0.77. Series check: after a map-1 win the map-2 residual is +0.030 [+0.004, +0.057] (momentum); contrast with a loss [−0.001, +0.073].
+- **Vs Kalshi, `player_round_glicko_rookie` (tradeable quote, fees rounded, LoL caps):** raw series −0.010, maps −0.010 (n.s.); blended series −0.014, maps +0.003 (n.s.). Flat ROI raw series+map +16.3% [+3.8, +29.5]; depth-capped +30.5% [+11.7, +53.2], 387 of 1,178 bets fill, Kelly $50 → $450. Blended series depth-capped +19.8% [+0.9, +39.6], $50 → $297. Quote timing: series edge gone by 24 h (+0.003) and 6 h (−0.000); maps −0.021 / −0.007. Map ROI is still mostly April 2026; June maps −10% depth-capped.
+
 Partial crawl (VLR from 2024-06-26, 7,597 matches): seed Jun–Sep 2024, stage 1 Oct 2024 – Aug 2025 (8,241 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps; Kalshi had no Valorant markets Oct–Dec 2025, so market rows are Sep 2025 and Jan–Jun 2026). Δ = candidate − base map log loss, paired bootstrap by match. Report: [`docs/elo_backtest.md`](../elo_backtest.md). Rerun on the full crawl.
 
 Second partial run (VLR from 2023-12-25, 10,027 matches): seed Dec 2023 – Feb 2024, stage 1 Mar 2024 – Aug 2025 (13,802 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps).

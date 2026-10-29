@@ -5,7 +5,7 @@ import pandas as pd
 
 from promval.ratings.regions import REGION_CODES, macro_region
 
-HALF_LIVES = (2, 3, 5, 8, 12)
+HALF_LIVES = (3, 5, 8, 12, 20, 40, 80)
 FORM_STATS = ("rating", "acs", "kast", "adr", "fkfd")
 REGIONS = tuple(REGION_CODES)
 
