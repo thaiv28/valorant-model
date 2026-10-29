@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Parallel VLR crawl
+
+Branch `crawl-workers`, base `main`. `promval vlr crawl --workers N` fetches each results page's missing match and economy pages in N threads. The fetcher is thread-safe: one shared request slot per `--min-interval` (the total rate cap), and a 429/5xx pauses every worker for the backoff, not only the one that hit it. Default stays 1 worker. Checks: pytest, ruff.
+
 ## 2026-10-28 — Pick advantage check; capped-Kelly rerun
 
 Docs only. On Feb–Jun 2026 picked maps (2,409), the picking team won 52.5% vs 50.0% predicted by player_round_glicko (+2.5 pts, 95% [+0.5, +4.4]); a constant picker bonus of 0.11 logit improves picked-map log loss 0.6457 → 0.6443 (in-sample). Pre-veto the picker of map 1 isn't predictable in Bo3 (VLR team1 picks it 46%) but is in Bo5 (70%), so a full map model is deferred. Capped-Kelly rerun (tradeable quotes, in-sample): player_round_glicko raw series+map flat ROI +13.4% [+1.5, +27.0], $50 → $3,622; blended series +9.6%, $50 → $158; blended maps −3.4%. Limits: in-sample parameters; fills at hourly quotes with no depth.

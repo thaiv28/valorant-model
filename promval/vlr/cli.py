@@ -32,6 +32,12 @@ def crawl(
     full: Annotated[
         bool, typer.Option(help="Walk back to --since even past cached pages.")
     ] = False,
+    workers: Annotated[
+        int,
+        typer.Option(
+            min=1, help="Parallel requests; --min-interval still caps the total rate."
+        ),
+    ] = 1,
 ):
     """Cache completed matches since a date (inclusive)."""
     typer.echo(f"Estimate: ~2 requests per new match at {min_interval:g} s")
@@ -41,6 +47,7 @@ def crawl(
         economy_since,
         max_matches,
         stop_after_known_pages=10**9 if full else 3,
+        workers=workers,
     )
     typer.echo(
         f"pages={result.pages_read} matches={result.matches_fetched} "
