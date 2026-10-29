@@ -8,6 +8,9 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 
 | Path | Purpose |
 |---|---|
+| `promval/ratings/` | Team Elo, model registry, chronological map replay; optional `elo_weights.json` |
+| `promval/evaluation.py`, `scripts/evaluate_elo.py` | Scoring helpers and offline benchmark report |
+| `tests/test_elo.py`, `tests/test_evaluation.py` | Ratings, leakage, candle formats and synthetic-DB benchmark checks |
 | `promval/main.py` | CLI entry; mounts the `kalshi` and `vlr` command groups |
 | `promval/kalshi/api.py` | Public HTTP client, pacing, retries and pagination |
 | `promval/kalshi/collect.py` | Raw catalog, trade, candle and book files |
@@ -72,3 +75,13 @@ The numbered DB build loads `kalshi_markets` from `collect.data_dir()/markets/{K
 Candidates start within ±30 hours of the advertised schedule (otherwise open time +24 hours), allowing a one-day slip. Exact → alias → anchor passes repeat until no new link is made, re-deriving aliases from every confident link. Exact matching accepts either the outside name or the alternate inside a trailing parenthetical. Alias matching requires both UUIDs. An anchor requires one exact/aliased team appearing in only one candidate match; the other name must share normalized tokens, match team-code initials/a token, or have difflib similarity ≥0.6. Prefer an exact other-side name present in the window over a looser subteam name; competing matches remain ambiguous. Finally both fuzzy name similarities must reach 0.8, without overriding that preference. Normalization removes accents and generic organization words and equates female/women/GC. Map events inherit their series match (map-only catalogs use a representative map event), then select the played map by order; missing rows are `unplayed`.
 
 Cross-check each linked binary settled market against the series/map winner; skip scalar settlements and unknown winners. `db/link_report.txt` lists unlinked events/unplayed maps with team names, schedule, event name and reason; anchor name mappings; and mismatched tickers with VLR IDs. The linker prints linked/total series and maps, aliases, market agreements/checked and mismatches. Re-runs replace derived rows. The Aug 18–Oct 27, 2026 catalog window linked 194/252 series against 233 cached matches before anchor/variant improvements. Settlement checks agreed on 1256/1264; eight disagreements came from the subsequently fixed VLR map ordering bug. Updated coverage is pending.
+
+## Ratings and benchmark
+
+Built v1: `coin` (0.5) and `team_elo`, one global pool across all tiers. Teams start at 1500; map-win Elo uses scale 400 and binary outcomes, no margin. Predict before updating, replaying by (match start UTC, match_id, map order). Model factories in `ratings/models.py` accept keyword parameters; later increments add registry entries. Series probabilities use the first map's pre-update p and independent maps to first ceil(best_of/2) wins; skip missing/even best-of and unknown series winners.
+
+2021–22 seed ratings only; score from 2023-01-01. Select K by all-section tuning map log loss from grid 16,24,32,40,48,64, strictly before `HOLDOUT_START = "2026-07-01"`. Holdout scores appear only with `--holdout`, never select K. Sequential holdout updates use only already played maps. Sections: all, events.section (vct/vcl/gc/t3/collegiate/offseason/unknown), international=0/1. Metrics: rows, log loss (clip 1e-6), Brier, accuracy (0.5 picks get half credit), 10-bin ECE. Prometheus's five evaluation helpers are ported with attribution. Paired log-loss differences use 2,000 resamples, seed 0, whole matches clustered by match_id; a 95% interval excluding zero is significant. Tuning comparisons are selection diagnostics.
+
+Kalshi joins links to markets and competitor aliases; skip unresolved teams/missing candles. Read `collect.data_dir()/candles/<TICKER>.json.gz`: last valid hourly candle ending no later than VLR match start, midpoint of yes bid/ask closes (`close_dollars` or historical `close`, both dollars). Orient to VLR team1; one contract per event, prefer team1, otherwise complement team2. Compare Elo and market on identical series/map rows, clustered by match. Map rows use the model's pre-match chance (the first map's p), matching the market's pre-match quote. Missing Kalshi inputs report “no linked markets”. No fees/execution simulation.
+
+Run `uv run python scripts/evaluate_elo.py --db db/valorant.db --out docs/elo_backtest.md`; optional `--k-grid 16,32`, `--score-from 2023-01-01`, `--holdout`, `--write-weights`. Weights save selected K and last tuning date to `promval/ratings/elo_weights.json`; real-DB evaluation has not run here.

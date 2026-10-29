@@ -2,7 +2,7 @@
 
 ## Status
 
-2026-10-28: Kalshi collector (scheduled) and VLR crawler, parsers, events and DB build are in place. No model yet.
+2026-10-28: Kalshi collector (scheduled) and VLR crawler, parsers, events and DB build are in place. Elo v1 and the offline benchmark harness are built; real-DB evaluation is pending.
 
 - Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (scheduled every 6 h once secrets/variable are set and S3 is seeded). The first full backfill was started 2026-10-28.
 - Linking: catalog loader, team matching, learned aliases, map links and settlement cross-checks.
@@ -18,7 +18,8 @@
 
 ## Future work
 
+- Model increments: round-share credit → player ratings with uncertainty → league offsets → map strength → veto model.
+- Run Elo v1 against the real DB and cached Kalshi pre-match candles.
 - The VLR backfill is running (`promval vlr crawl --since 2021-01-01 --full`, started 2026-10-28).
 - Review unlinked Kalshi events and settlement mismatches after the full VLR backfill.
 - bo3.gg is not used: its robots.txt disallows `/api/`; Kalshi's own settled results cross-check VLR instead.
-- Elo v1 and the benchmark harness (design plan Phase 2).

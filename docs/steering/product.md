@@ -14,12 +14,19 @@ Price Valorant matches before each map well enough to beat Kalshi's prices after
 
 From a better rating model, as in Prometheus: not from speed. Kalshi's map prices react to the veto immediately, so post-veto latency is not an edge to pursue.
 
-## Model (planned)
+## Model
 
-1. Player-based round Elo: ratings belong to players and update on round share; Glicko-style uncertainty; region offsets linked by international and third-party events.
-2. Map layer: team-by-map deviation, shrunk, decayed and scaled by roster continuity.
-3. Veto model: conditional logit per ban/pick; every veto order enumerated for map-slot and series prices.
-4. Calibration (temperature, Bo1/LAN/region) and a market blend as in Prometheus.
+Built: v1 team Elo on binary map wins, with coin baseline and a match-clustered benchmark against Kalshi pre-match prices. Real-DB validation is pending.
+
+Planned increments, in order:
+
+1. Round-share credit.
+2. Player ratings with uncertainty.
+3. League offsets linked by international and third-party events.
+4. Map strength, shrunk and adjusted for roster continuity.
+5. Veto model for map-slot and series prices.
+
+Calibration and market blending follow validated rating improvements.
 
 ## Trading rules
 
