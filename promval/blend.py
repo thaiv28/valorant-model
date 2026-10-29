@@ -52,10 +52,10 @@ def fit(p, mid, won):
     return float(beta[0]), float(beta[1]), len(y)
 
 
-def walk_forward(frame, score_from="2023-01-01", min_rows=100):
+def walk_forward(frame, validate_from="2025-09-01", min_rows=100):
     """Return annotated rows and monthly fits, using strictly earlier months.
 
-    Training is separate by kind, starts at score_from, and excludes holdout.
+    Training is separate by kind, starts at validate_from, and excludes holdout.
     Unfitted rows retain the exact midpoint and are flagged for report exclusion.
     """
     if min_rows < 1:
@@ -69,7 +69,7 @@ def walk_forward(frame, score_from="2023-01-01", min_rows=100):
         return rows, pd.DataFrame(columns=columns)
     dates = pd.to_datetime(rows.start_utc, utc=True)
     months = dates.dt.strftime("%Y-%m")
-    eligible = (dates >= pd.Timestamp(score_from, tz="UTC")) & (
+    eligible = (dates >= pd.Timestamp(validate_from, tz="UTC")) & (
         dates < pd.Timestamp(HOLDOUT_START, tz="UTC")
     )
     snapshots = []

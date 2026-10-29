@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Two-stage benchmark and layer hook
+
+Branch `two-stage`, base `main`. Split outcome tuning (2023-01-01 to 2025-09-01 exclusive) from frozen validation against Kalshi (2025-09-01 to 2026-07-01 exclusive). Added ISO date controls, context-aware layer hooks with identity default, validation summaries, monthly identical-row breakdowns, and synthetic separation/layer tests. Holdout remains optional and excluded from selection/blend fitting. Checks: offline `uv run pytest -q` (201 passed, 17.46s), `uv run ruff format --check`, and `uv run ruff check`, with `UV_NO_SYNC=1` to avoid sandbox sync startup panic; direct virtualenv checks also passed. Limits: no full-data benchmark or network; baseline CI timing unavailable after initial uv startup failure. Monthly ROI avoids unnecessary bootstrap work.
+
 ## 2026-10-28 — Rookie discount and tier moves
 
 Branch `rookie-moves`, base `main`. Added optional player-only logarithmic rookie discounts and linearly fading tier-move adjustments to prediction/update strengths, with update-only map counts and majority tier homes. Registered three narrowed-grid Glicko variants; existing defaults retain exact predictions. Tests cover decay, promotions/demotions, ties, excluded sections, update expectations, leakage and registry grids. Checks: offline `uv run --no-sync pytest -q` (221 passed, 14.40 s; baseline 198 in 21.52 s), `ruff format --check`, `ruff check`, and `git diff --check` passed. Plain `uv run` panicked locally; used the existing environment with `--no-sync`. Limits: not yet benchmarked; no holdout tuning or network access.
