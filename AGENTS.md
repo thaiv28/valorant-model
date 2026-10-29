@@ -11,6 +11,7 @@ Read only what your change touches. If your task came with a spec naming files a
 - **Feature status, known limits, future work:** [Current state](docs/steering/current_state.md).
 - **Goals and the model plan:** [Product](docs/steering/product.md) and the design plan, `docs/design_plan.pdf`.
 - **Schedules, storage, AWS:** [Deployment](docs/steering/deployment.md).
+- **Before any model change:** tech.md, Model change rules, and the [research ledger](docs/research/README.md) (what was tried, with numbers).
 
 Read large docs by section (`grep -n '^## '`), not whole. Code and the built data are the source of truth; if a doc disagrees, verify and fix the doc in the same change. The user's latest instructions override these docs.
 
@@ -20,6 +21,7 @@ Read large docs by section (`grep -n '^## '`), not whole. Code and the built dat
 - **Feature status, known limit or future work changes:** `docs/steering/current_state.md` (suggestions go in its **Future work** section).
 - **Sources, tables, algorithms, file or test layout:** `docs/steering/tech.md`.
 - **Schedules, storage, secrets, AWS:** `docs/steering/deployment.md`.
+- **Any tested model idea, adopted or not:** an entry in `docs/research/README.md` with its stage-1 and stage-2 numbers. **A model or benchmark change:** regenerate and commit `docs/elo_backtest.md` (command in tech.md, Model change rules).
 
 `uv run pytest -q` includes `tests/test_steering.py`, which fails when code changed (uncommitted) without a `work_log.md` change or a steering doc passes its word budget.
 
@@ -51,7 +53,7 @@ Work in a separate worktree (`git worktree add ../valorant-model-<branch> -b <br
 - **Raw first, parse later.** Raw responses are saved unchanged (gzip) and the DB is always rebuilt from them; parsers never fetch.
 - **Data access is raw SQL** on SQLite (`sqlite3` or `pd.read_sql`); no ORM. Schema changes go in a new numbered `scripts/NNN_*.sql`; the DB is rebuilt from scratch, so there are no migrations.
 - **Times are stored in UTC** (ISO 8601 with `Z`). VLR's `data-utc-ts` is US Eastern, not UTC: convert it.
-- **Model changes need a significant benchmark gain** (paired bootstrap by series, 95% interval excluding 0), with a holdout of games from 2026-07-01 on that is never tuned on. Rules follow Prometheus's `docs/steering/tech.md`, Metric change rules.
+- **Model changes need a significant stage-1 gain and no stage-2 regression,** judged with the two-stage benchmark; games from 2026-07-01 on are a holdout opened once. Full rules: tech.md, Model change rules.
 - **Trading** reuses Prometheus's executor rules: League's limits from a $50 seed; no new orders once capital (seed + settled profit − open stakes) is $0 or less.
 - **CI time is a budget.** Measure anything that adds CI work and record before/after in the work log.
 - **Token use is a budget.** Keep docs short; scripts print summaries, not per-row logs.

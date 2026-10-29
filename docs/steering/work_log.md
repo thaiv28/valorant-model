@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Model change rules and research ledger
+
+Docs only. Added tech.md "Model change rules" (two stages: tune on outcomes 2023-01 to 2025-09, validate frozen models against outcomes and Kalshi 2025-09 to 2026-07, holdout opened once; adopt only on a significant stage-1 gain with no guarded regression and ≥ 0.0005 for additions; confirm on stage 2; removals non-inferior; data fixes lighter), `docs/research/README.md` (ledger, backfilled with every variant tested so far and its partial-crawl numbers), and AGENTS.md pointers: ledger entries for every test, commit `docs/elo_backtest.md` with each model change (first full-data report pending the crawl). Checks: pytest.
+
 ## 2026-10-28 — Two-stage benchmark and layer hook
 
 Branch `two-stage`, base `main`. Split outcome tuning (2023-01-01 to 2025-09-01 exclusive) from frozen validation against Kalshi (2025-09-01 to 2026-07-01 exclusive). Added ISO date controls, context-aware layer hooks with identity default, validation summaries, monthly identical-row breakdowns, and synthetic separation/layer tests. Holdout remains optional and excluded from selection/blend fitting. Checks: offline `uv run pytest -q` (201 passed, 17.46s), `uv run ruff format --check`, and `uv run ruff check`, with `UV_NO_SYNC=1` to avoid sandbox sync startup panic; direct virtualenv checks also passed. Limits: no full-data benchmark or network; baseline CI timing unavailable after initial uv startup failure. Monthly ROI avoids unnecessary bootstrap work.

@@ -76,6 +76,22 @@ Candidates start within ±30 hours of the advertised schedule (otherwise open ti
 
 Cross-check each linked binary settled market against the series/map winner; skip scalar settlements and unknown winners. `db/link_report.txt` lists unlinked events/unplayed maps with team names, schedule, event name and reason; anchor name mappings; and mismatched tickers with VLR IDs. The linker prints linked/total series and maps, aliases, market agreements/checked and mismatches. Re-runs replace derived rows. The Aug 18–Oct 27, 2026 catalog window linked 194/252 series against 233 cached matches before anchor/variant improvements. Settlement checks agreed on 1256/1264; eight disagreements came from the subsequently fixed VLR map ordering bug. Updated coverage is pending.
 
+## Model change rules
+
+```bash
+uv run python scripts/evaluate_elo.py --out docs/elo_backtest.md               # two-stage benchmark, all models (~2–10 min)
+uv run python scripts/evaluate_elo.py --layers none,regional,form --out docs/elo_backtest.md
+uv run python scripts/evaluate_elo.py --write-weights                          # also store each model's stage-1 parameters
+```
+
+- **Stages.** Stage 1 (tuning): 2023-01-01 to 2025-09-01, match outcomes only; every parameter, grid choice and layer fit is selected here. Stage 2 (validation): 2025-09-01 to 2026-07-01, the frozen models against outcomes and against Kalshi (log loss, blend, returns). Holdout: 2026-07-01 on, never used for selection or fitting; opened once, for the final verdict, with `--holdout`.
+- **Adopt a change only on a significant stage-1 gain.** The paired-bootstrap 95% interval of the per-map log-loss difference against the current best model, resampling whole matches, must exclude 0 on the sections the change targets (all, or a section such as vct, vcl, gc or international), and no guarded section (all, vct, vcl, gc, international) may be significantly worse. An added parameter, feature or layer also needs a gain of at least 0.0005.
+- **Then confirm on stage 2.** Stage-2 outcome log loss and blended log loss vs Kalshi must not be significantly worse than the current best. A stage-2 gain is reported but is not a reason to adopt a change that failed stage 1; tuning on stage 2 to pass it is not allowed.
+- **Removals** ship when every guarded section's interval stays below +0.0005 on both stages (non-inferior).
+- **Every test goes in the ledger,** adopted or not, with its numbers: `docs/research/README.md`. Count the tests run against stage 2; many tries against one validation window make a lucky winner likely, so prefer ideas with a stage-1 case.
+- **Trading results are reported, not gates:** the returns tables (raw and blended, LoL-capped Kelly, monthly breakdown) are in-sample for the blend's earliest months and assume fills at hourly quotes; a single month driving a result is called out.
+- **Data fixes** (which data a model uses: a link, alias, tier, parser bug) are not model changes: they ship when they are correct and the benchmark doesn't get significantly worse.
+
 ## Ratings and benchmark
 
 Kalshi price (`--quote`): `tradeable` (default) = first hourly bid/ask ending ≥30 min after the market opened and ≥2 h before the scheduled start with spread ≤ `--max-spread` (0.06), i.e. a price a bot could trade before any veto; markets without one are skipped. `prestart` = last candle before start (can price the veto; comparison only). Returns use Prometheus's pregame caps (`LOL_SIZING`): full Kelly, ≤10% of capital and ≤$250 per fixture, $250 per order, $1k exposure, $2k per day, day bets sized from opening capital; `sizing="full"` is uncapped.
