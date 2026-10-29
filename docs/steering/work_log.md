@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Kalshi–VLR linking
+
+Branch `kalshi-link`, base `main` (56b502a). Added offline catalog loading, schedule parsing, three-pass series matching, consistent UUID aliases, inherited map links and binary settlement checks. Rebuild writes `kalshi_markets`, `team_aliases`, `kalshi_links` and `db/link_report.txt`; missing catalogs remain empty, absent maps are unplayed, scalar settlements are skipped. Tests cover normalization, Eastern offsets, renames, fuzzy/ambiguous candidates, slip boundaries, alias conflicts, map order, results and fixture DB rebuilds. Checks: `UV_NO_SYNC=1 uv run pytest -q` (85 passed, 3.11 s; existing suite: 63 passed, 3.07 s), ruff format/check and `git diff --check` passed. Limits: not run on the real catalog. Plain `uv run` panics in sandbox initialization; `UV_NO_SYNC=1` works. Existing tracked egg-info changes were left untouched.
+
 ## 2026-10-28 — VLR map order from the map tabs
 
 Branch `vlr-map-order`, base `main` (89aa707). Map order now comes from VLR's numbered map tabs ("1 Ascent"), which follow the veto and play order; the stat sections can be listed differently. Found by the Kalshi–VLR cross-check: all 8 map-result mismatches (3 matches) were maps in the wrong order. Regression fixture 730547. Checks: pytest, ruff format/check.
