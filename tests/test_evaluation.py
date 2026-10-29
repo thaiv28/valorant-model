@@ -677,6 +677,9 @@ def test_stage_separation_layers_and_default_market_window(
         "--quote",
         "prestart",
         "--holdout",
+        # The temperature fit also applies layers to stage-1 rows; this test
+        # checks only which rows each stage sees.
+        "--no-series-temperature",
     ]
     selected = benchmark.main(args)
     assert len(fitted) == len(applied) == 1
@@ -966,3 +969,30 @@ def test_robustness_table_populated_metrics():
     assert float(cells[4]) == pytest.approx(-np.log(0.8) + np.log(0.6), abs=1e-6)
     assert float(cells[5]) == pytest.approx(-np.log(0.7) + np.log(0.6), abs=1e-6)
     assert cells[6].strip() == cells[7].strip() == "92.31%"
+
+
+def test_series_temperature_fit_and_apply():
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    p_map = rng.uniform(0.2, 0.8, n)
+    raw = np.array([series_probability(p, 3) for p in p_map])
+    truth = benchmark.temper(raw, 0.7)  # planted: real odds are softer
+    frame = pd.DataFrame(
+        {
+            "match_id": np.arange(n),
+            "game_id": np.arange(n),
+            "best_of": 3,
+            "p": p_map,
+            "series_won": (rng.uniform(size=n) < truth).astype(float),
+            "start_utc": "2024-06-01T00:00:00Z",
+        }
+    )
+    temps = benchmark.fit_series_temperature(frame)
+    assert temps[1] == 1.0 and abs(temps[3] - 0.7) <= 0.06
+    tempered = benchmark.series_rows(benchmark.with_series_temperature(frame, temps))
+    untempered = benchmark.series_rows(frame)
+    assert np.allclose(tempered.p, benchmark.temper(untempered.p, temps[3]))
+    # Few rows: no temperature.
+    assert benchmark.fit_series_temperature(frame.head(10))[3] == 1.0
