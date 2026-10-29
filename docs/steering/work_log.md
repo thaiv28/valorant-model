@@ -4,7 +4,7 @@
 
 Cache built DBs by input inventory and code hash; unchanged hours skip rebuilds when S3 state metadata `inputs=<hash>` matches. Cold raw-cache misses extract `valorant-model/seed/raw.tar.zst` before sync; successful raw-cache saves refresh missing or week-old seeds. Rebuilds publish the walk-forward artifact to `valorant-model/feed/blend_artifact.json`, without changing the committed artifact. Workflow tests cover cache keys, skip guards, uploads and seed guards. Checks: offline no-sync pytest: 393 passed (81.58s); workflow tests: 9 passed (0.06s). Ruff format/check, cached-PyYAML parsing and Bash syntax pass. Standard uv/uvx hit sandbox/runtime errors; checks use offline no-sync and cached PyYAML. Runner timings must be measured after merge. Sandbox blocked Git metadata writes, so fetch/branch creation failed; edits remain in the existing game-feed checkout.
 
-Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words. The DB cache key hashes file contents (not sizes), so a same-size page revision still rebuilds.
+Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words. The DB cache key hashes file contents (not sizes), so a same-size page revision still rebuilds. Workflow tests updated for the content hash.
 
 ## 2026-10-29 — Game execution inputs
 

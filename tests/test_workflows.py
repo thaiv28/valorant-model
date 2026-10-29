@@ -113,10 +113,11 @@ def test_refresh_db_input_hash_and_exact_cache():
     text = (WORKFLOW.parent / "refresh-db.yml").read_text()
     assert "hashFiles('scripts/**', 'promval/**', 'uv.lock')" in text
     assert (
-        "find data/vlr data/kalshi -type f -not -path '*/books/*' -printf '%P %s\\n'"
+        "find data/vlr data/kalshi -type f -not -path '*/books/*' "
+        "-not -path 'data/vlr/parsed/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum"
         in text
     )
-    assert "LC_ALL=C sort; printf" in text
+    assert "xargs -0 sha256sum; printf" in text
     assert "sha256sum" in text
     assert text.count("key: db-${{ steps.inputs.outputs.hash }}") == 2
     restore = text.split("id: db\n", 1)[1].split("      - name:", 1)[0]
