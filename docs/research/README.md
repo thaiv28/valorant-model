@@ -6,6 +6,18 @@ Every model idea tested, adopted or not, newest first, with its numbers. Rules: 
 
 Partial crawl (VLR from 2024-06-26, 7,597 matches): seed Jun–Sep 2024, stage 1 Oct 2024 – Aug 2025 (8,241 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps; Kalshi had no Valorant markets Oct–Dec 2025, so market rows are Sep 2025 and Jan–Jun 2026). Δ = candidate − base map log loss, paired bootstrap by match. Report: [`docs/elo_backtest.md`](../elo_backtest.md). Rerun on the full crawl.
 
+Second partial run (VLR from 2023-12-25, 10,027 matches): seed Dec 2023 – Feb 2024, stage 1 Mar 2024 – Aug 2025 (13,802 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps).
+
+- **Series independence check (2026-10-29): miscalibrated, fix next.** Stage 2, 2,218 Bo3: series odds from independent maps are too extreme (predicted 5% → won 10%; 16% → 23%; 26% → 35%; 75% → 69%; 96% → 90%). Map-2 dependence is not significant (after a map-1 win the residual is +0.021 [−0.005, +0.048]; contrast [−0.022, +0.051]); 1–1 deciders +0.014 (n.s.).
+- **Quote-time robustness (2026-10-29).** `rookie+form` raw vs Kalshi at the first tradeable quote (~40 h out): series −0.005, maps −0.012; at 24 h: series +0.008, maps −0.022; at 6 h: series +0.005, maps −0.008. Blended series −0.014 / +0.000 / −0.004. Kalshi's series price sharpens toward the start; the model's map advantage holds at every time.
+- **Depth caps and rounded fees (2026-10-29).** Half the volume traded at our price or better within 6 h of the quote, fees rounded up per order: only 307/534 series and 99/675 map bets fill. Filled bets keep a positive flat ROI (series+map raw +26.9% [+7.9, +47.8]; blended +14.9% [+0.1, +30.1]) but LoL-capped Kelly falls from $4,637 to $298 (raw) and $78 → $106 (blended). Map books are mostly too thin to trade at size.
+- **Multi-stat form layer (2026-10-29): rejected.** Rating, ACS, KAST, ADR, FK−FD (ridge 1, H = 12): stage 1 −0.0023 but VCT significantly worse (+0.0021); stage 2 −0.0010 (n.s.).
+- **Form layer, retest (2026-10-29): kept, weaker.** Over the retuned rookie base: stage 1 −0.0015 [−0.0024, −0.0006], stage 2 −0.0007 (n.s.); H = 2 (grid minimum).
+- **Rookie discount, wider grid (2026-10-29): adopted 150 / 200 maps.** Over `player_round_glicko`: stage 1 −0.0046 [−0.0061, −0.0030], stage 2 −0.0069 [−0.0092, −0.0047]; VCL and GC significant on both; beats the earlier 200 / 100 (−0.0035 / −0.0062). Penalty now at the grid's low edge.
+- **Regional calibration, retest (2026-10-29): still pending.** 496 cross-region stage-1 maps; effects stable (China −0.23, Americas +0.20); little gain.
+
+First partial run (VLR from 2024-06-26):
+
 - **Form layer (2026-10-28): adopted (candidate).** Starters' recent VLR rating, logit p′ = logit p + w·(form₁ − form₂), fitted on stage 1 (H = 5 maps, the grid's smallest; w = 1.41). Over `player_round_glicko_rookie`: stage 1 −0.0030 [−0.0047, −0.0013], stage 2 −0.0027 [−0.0045, −0.0010]; VCL significant on both; no section worse. Next: H < 5.
 - **Regional calibration layer (2026-10-28): not adopted (retest on full history).** Ridge-4 region effects and scale on cross-region maps (327 stage-1 rows; China −0.30, Americas +0.20, s = 0.97): stage 1 −0.0004 (not significant, below 0.0005); stage 2 international −0.011 [−0.024, +0.001].
 - **Rookie discount (2026-10-28): adopted (candidate).** Prometheus's log1p discount (chose penalty 200, 100 maps, both grid maxima). Over `player_round_glicko`: stage 1 −0.0046 [−0.0072, −0.0020], GC −0.0097 significant; stage 2 −0.0070 [−0.0099, −0.0040], VCL significant; no section worse. Next: larger grid.
