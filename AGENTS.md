@@ -47,6 +47,7 @@ Work in a separate worktree (`git worktree add ../valorant-model-<branch> -b <br
 ## Conventions
 
 - **Network is polite and cached.** VLR.gg: one request per 2 s by default, a User-Agent naming this repo, never re-fetch a cached final match page. Kalshi: public endpoints, small sleeps. Every fetcher takes an injectable `get` so tests never touch the network.
+- Changing a VLR parser's output requires bumping `PARSER_VERSION`.
 - **Raw first, parse later.** Raw responses are saved unchanged (gzip) and the DB is always rebuilt from them; parsers never fetch.
 - **Data access is raw SQL** on SQLite (`sqlite3` or `pd.read_sql`); no ORM. Schema changes go in a new numbered `scripts/NNN_*.sql`; the DB is rebuilt from scratch, so there are no migrations.
 - **Times are stored in UTC** (ISO 8601 with `Z`). VLR's `data-utc-ts` is US Eastern, not UTC: convert it.

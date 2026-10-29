@@ -7,6 +7,9 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
+# Bump whenever any parser's output changes; invalidates the parsed cache.
+PARSER_VERSION = 1
+
 
 class ParseError(ValueError):
     def __init__(self, match_id: int, reason: str):
