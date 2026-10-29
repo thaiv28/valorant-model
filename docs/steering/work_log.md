@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Map strength offsets and pick bonus
+
+Branch `map-strength`, base `main`. Added optional centred per-player/team map offsets, picker strength bonuses, and `predict_maps` without history mutation. Replay loads picked_by; two registry variants fix the adopted rookie/RD base and vary map/pick parameters. Tests cover centring, keys, update expectations, missing context, prediction state, exact default predictions, registry grids and SQL loading. Checks: 293 tests passed (24.14 s); `uv run --no-sync pytest -q`, Ruff format/check and `git diff --check` passed. Plain `uv run` crashed in macOS configuration; offline/no-sync runs passed. Grids rescaled after a first run (round-level points amplify ~3× into map odds): map_k {0.5,1,2,4}, pick_bonus {1,2,3,5,8}. Verdict: both rejected (gains below 0.0005); left off.
+
 ## 2026-10-29 — Series momentum chain
 
 Branch `momentum`, base `main`. Added exact two-state series/slot odds and stage-1 momentum MLE using first-map probabilities. The optional benchmark flag fits each model/layer separately, then refits temperatures; Kalshi map markets use slot chances conditional on being played. Added `series_odds.py` for frozen stage comparisons, clustered intervals and calibration. Real DB: m=0.196441; m+T versus T series log-loss Δ +0.000005 stage 1, +0.000162 [+0.000028,+0.000299] stage 2; later-map slot Δ +0.001640. Checks: pytest, ruff format/check, diff check, real-DB report. Observed CI timing: 262 existing tests 24.42s → 270 tests 24.57s; 8 added tests alone 1.57s. Used `UV_OFFLINE=1 UV_NO_SYNC=1` after uv's local startup panic. Verdict: rejected (no gain over the temperature; slot odds worse); flag stays off. Limits: holdout unopened.

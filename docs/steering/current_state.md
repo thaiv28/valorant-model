@@ -18,7 +18,7 @@
 
 ## Future work
 
-- Model increments: map strength → veto model; map-2 momentum (+3 points after a map-1 win) in series odds.
+- Map strength, pick bonus and momentum were tested and rejected (ledger); a veto model is not worth building on that evidence.
 - Store the series temperature with the weights for live use.
 - Open the July 2026+ holdout once, after the model is frozen (ask the user first).
 - Review unlinked Kalshi events; two matches (8 markets) settle differently on Kalshi and VLR.

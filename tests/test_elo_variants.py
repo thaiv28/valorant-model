@@ -1,4 +1,6 @@
 import itertools
+import sqlite3
+from copy import deepcopy
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,6 +9,7 @@ import pytest
 from promval.ratings.elo import EloConfig, EloModel, TeamElo
 from promval.ratings.models import MODELS, PARAM_GRIDS
 from promval.ratings.regions import REGION_CODES, macro_region
+from promval.ratings.replay import load_maps
 from promval.ratings.rounds import map_win
 
 
@@ -152,7 +155,7 @@ def test_region_offsets_only_cross_region_and_zero_sum():
 
 
 def test_registry_grids_and_v1_regression():
-    assert len(MODELS) == len(PARAM_GRIDS) == 18
+    assert len(MODELS) == len(PARAM_GRIDS) == 20
     assert "team_binary" not in MODELS
     for name in MODELS:
         if name == "coin":
@@ -438,6 +441,8 @@ def test_default_glicko_exact_pre_adjustment_predictions():
             won=int(i % 2 == 0),
             start_utc=f"2026-01-{i + 1:02d}T12:00:00Z",
             section=("vcl", "vct", "gc")[i % 3],
+            map=("Ascent", "Bind", "Haven")[i % 3],
+            picked_by=(1, 2, None)[i % 3],
         )
         assert model.predict(game) == probability
         model.update(game)
@@ -496,3 +501,197 @@ def test_teams_ignore_player_adjustments():
 def test_invalid_player_adjustment_parameters(options):
     with pytest.raises(ValueError, match="rookie/move"):
         EloModel(unit="player", **options)
+
+
+@pytest.mark.parametrize(
+    "unit,map_unit,keys",
+    [
+        ("player", "player", {1, 2, 3, 4}),
+        ("player", "team", {10, 20}),
+        ("team", "player", {10, 20}),
+        ("team", "team", {10, 20}),
+    ],
+)
+def test_map_offsets_learn_centred_strengths_and_unit_keys(unit, map_unit, keys):
+    model = EloModel(
+        unit=unit, map_k=16, map_unit=map_unit, lineups={1: ((1, 2), (3, 4))}
+    )
+    model.update(row(map="Bind", won=0))
+    assert set(model.map_offsets) == keys
+    assert all(offsets == {"Bind": 0} for offsets in model.map_offsets.values())
+    for _ in range(8):
+        game = row(map="Ascent")
+        error = model.score(game) - model._state(game)[-1]
+        before = deepcopy(model.map_offsets)
+        model.update(game)
+        for key, offsets in model.map_offsets.items():
+            sign = 1 if key in {1, 2, 10} else -1
+            assert offsets["Ascent"] == pytest.approx(
+                before[key].get("Ascent", 0) + sign * 16 * error / 2
+            )
+            assert sum(offsets.values()) == pytest.approx(0, abs=1e-12)
+    assert model.predict(row(map="Ascent")) > model.predict(row(map="Bind"))
+
+
+def test_map_strength_averages_starter_offsets_before_round_transform():
+    model = EloModel(
+        unit="player",
+        credit="round",
+        map_k=8,
+        lineups={1: ((1, 2), (3,))},
+        pick_bonus=20,
+    )
+    model.map_offsets = {1: {"Bind": 40}, 2: {"Bind": 20}, 3: {"Bind": -10}}
+    expected = 1 / (1 + 10 ** (-60 / 400))
+    game = row(map="Bind", picked_by=1)
+    assert model._state(game)[-1] == expected
+    assert model.predict(game) == map_win(expected)
+
+
+@pytest.mark.parametrize("picker", [None, float("nan"), 0, 3])
+def test_pick_bonus_unknown_and_decider(picker):
+    model = EloModel(pick_bonus=40)
+    assert model.predict(row(picked_by=picker)) == model.predict(row()) == 0.5
+
+
+@pytest.mark.parametrize("picker,sign", [(1, 1), (2, -1)])
+def test_pick_bonus_prediction_and_update_expectation(picker, sign):
+    model = EloModel(pick_bonus=40)
+    game = row(picked_by=picker)
+    expected = 1 / (1 + 10 ** (-sign * 40 / 400))
+    assert model.predict(game) == expected
+    assert (model.predict(game) > 0.5) == (picker == 1)
+    model.update(game)
+    assert model.ratings[10] == pytest.approx(1500 + 32 * (1 - expected))
+
+
+@pytest.mark.parametrize("map_name", [None, float("nan"), 3])
+def test_missing_map_does_not_record_offsets(map_name):
+    model = EloModel(map_k=8)
+    for game in (row(), row(map=map_name)):
+        model.update(game)
+    assert model.map_offsets == {}
+
+
+@pytest.mark.parametrize("credit", ["binary", "margin", "round"])
+@pytest.mark.parametrize("map_unit", ["player", "team"])
+def test_predict_maps_matches_predict_and_does_not_record_state(credit, map_unit):
+    model = EloModel(
+        unit="player",
+        credit=credit,
+        rd=True,
+        map_k=16,
+        map_unit=map_unit,
+        pick_bonus=40,
+        rookie_penalty=200,
+        region_k=4,
+        move_up_penalty=100,
+        lineups={1: ((1, 2), (3, 4))},
+    )
+    for game in (
+        row(map="Bind", region="us", section="vcl"),
+        row(map="Ascent", section="vct"),
+    ):
+        model.update(game)
+    # Snapshot all model dictionaries, including counts, lineups, RD and history.
+    before = deepcopy({k: v for k, v in vars(model).items() if isinstance(v, dict)})
+    for picker in (1, 2, None, float("nan")):
+        game = row(map="Ascent", picked_by=picker, start_utc="2030-01-01T00:00:00Z")
+        values = model.predict_maps(
+            game, ["Ascent", "Bind", "Haven"], {"Ascent": picker}
+        )
+        assert values["Ascent"] == model.predict(game)
+        assert values["Bind"] == model.predict(row(map="Bind"))
+        assert model.predict_maps(game, ["Ascent"])["Ascent"] == model.predict(
+            row(map="Ascent", picked_by=None)
+        )
+        assert set(values) == {"Ascent", "Bind", "Haven"}
+        assert vars(game)["map"] == "Ascent"
+    assert {k: v for k, v in vars(model).items() if isinstance(v, dict)} == before
+    # The wrapper also accepts the pandas namedtuple rows used by replay.
+    import pandas as pd
+
+    game = next(
+        pd.DataFrame([vars(row(map="Bind", picked_by=2))]).itertuples(index=False)
+    )
+    assert model.predict_maps(game, [game.map], {game.map: game.picked_by})[
+        game.map
+    ] == model.predict(game)
+
+
+def test_predict_maps_only_initializes_unseen_starters():
+    model = EloModel(
+        unit="player",
+        map_k=8,
+        rd=True,
+        new_player="teammates",
+        lineups={1: ((1, 2), (3,))},
+    )
+    model.ratings[1] = 1600
+    before = deepcopy(
+        {k: v for k, v in vars(model).items() if isinstance(v, dict) and k != "ratings"}
+    )
+    model.predict_maps(row(), ["Bind", "Ascent"])
+    assert model.ratings == {1: 1600, 2: 1600, 3: 1500}
+    assert {
+        k: v for k, v in vars(model).items() if isinstance(v, dict) and k != "ratings"
+    } == before
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"map_k": -1},
+        {"map_k": float("nan")},
+        {"map_k": float("inf")},
+        {"pick_bonus": -1},
+        {"pick_bonus": float("nan")},
+        {"pick_bonus": float("inf")},
+        {"map_unit": "unknown"},
+    ],
+)
+def test_invalid_map_pick_parameters(options):
+    with pytest.raises(ValueError, match="map/pick"):
+        EloModel(**options)
+
+
+@pytest.mark.parametrize("variant", ["maps", "pick"])
+def test_map_pick_registry_exact_grids_and_adopted_defaults(variant):
+    name = f"player_round_glicko_rookie_{variant}"
+    base = {
+        "k": 32,
+        "tau": 0.5,
+        "rd_new": 280,
+        "rd_info": 0.25,
+        "new_player": "teammates",
+        "rookie_penalty": 200,
+        "rookie_maps": 400,
+    }
+    grid = {key: (value,) for key, value in base.items()}
+    grid.update(
+        map_k=(0.5, 1, 2, 4) if variant == "maps" else (0,),
+        pick_bonus=(0, 3) if variant == "maps" else (1, 2, 3, 5, 8),
+    )
+    if variant == "maps":
+        grid["map_unit"] = ("player", "team")
+    assert PARAM_GRIDS[name] == grid
+    for params in itertools.product(*grid.values()):
+        model = MODELS[name](**dict(zip(grid, params)))
+        assert model.unit == "player" and model.credit == "round" and model.rd
+        assert all(getattr(model, key) == value for key, value in base.items())
+
+
+def test_load_maps_includes_picker_and_nulls():
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("""
+            CREATE TABLE maps (game_id, match_id, "order", map, picked_by, score1, score2);
+            CREATE TABLE matches (match_id, start_utc, team1_id, team2_id, best_of, event_id, winner);
+            CREATE TABLE events (event_id, region, section, international);
+            INSERT INTO matches VALUES (1, '2026-01-01T12:00:00Z', 10, 20, 3, 1, 1);
+            INSERT INTO maps VALUES (1, 1, 1, 'Bind', 1, 13, 11),
+                                    (2, 1, 2, 'Ascent', 2, 13, 11),
+                                    (3, 1, 3, 'Haven', NULL, 13, 11);
+        """)
+        maps = load_maps(conn)
+    assert maps["picked_by"].iloc[:2].tolist() == [1, 2]
+    assert np.isnan(maps["picked_by"].iloc[2])

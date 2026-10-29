@@ -81,3 +81,23 @@ for variant in ("rookie", "moves", "rookie_moves"):
     if "moves" in variant:
         grid.update(move_up_penalty=(50, 100, 200), move_down_bonus=(0, 50))
     PARAM_GRIDS[name] = grid
+
+for variant in ("maps", "pick"):
+    name = f"player_round_glicko_rookie_{variant}"
+    base = {
+        "k": 32,
+        "tau": 0.5,
+        "rd_new": 280,
+        "rd_info": 0.25,
+        "new_player": "teammates",
+        "rookie_penalty": 200,
+        "rookie_maps": 400,
+    }
+    MODELS[name] = partial(EloModel, unit="player", credit="round", rd=True, **base)
+    PARAM_GRIDS[name] = {key: (value,) for key, value in base.items()}
+    PARAM_GRIDS[name].update(
+        map_k=(0.5, 1, 2, 4) if variant == "maps" else (0,),
+        pick_bonus=(0, 3) if variant == "maps" else (1, 2, 3, 5, 8),
+    )
+    if variant == "maps":
+        PARAM_GRIDS[name]["map_unit"] = ("player", "team")

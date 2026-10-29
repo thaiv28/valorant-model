@@ -11,6 +11,16 @@ TIER_RANKS = {"collegiate": 0, "t3": 1, "vcl": 2, "vct": 3}
 
 
 @dataclass(frozen=True)
+class _MapContext:
+    row: object
+    map: str
+    picked_by: int | None
+
+    def __getattr__(self, name):
+        return getattr(self.row, name)
+
+
+@dataclass(frozen=True)
 class EloConfig:
     k: float = 32.0
     init: float = 1500.0
@@ -63,6 +73,9 @@ class EloModel:
         move_up_penalty=0.0,
         move_down_bonus=0.0,
         move_maps=20,
+        map_k=0.0,
+        map_unit="player",
+        pick_bonus=0.0,
     ):
         if unit not in {"team", "player"} or credit not in {
             "binary",
@@ -72,6 +85,12 @@ class EloModel:
             raise ValueError("unknown Elo unit or credit")
         if new_player not in {"fixed", "teammates"}:
             raise ValueError("unknown new_player mode")
+        if map_unit not in {"player", "team"} or not all(
+            isfinite(v) and v >= 0 for v in (map_k, pick_bonus)
+        ):
+            raise ValueError("invalid map/pick parameters")
+        self.map_k, self.map_unit, self.pick_bonus = map_k, map_unit, pick_bonus
+        self.map_offsets = {}
         if k <= 0 or c <= 0 or tau <= 0 or region_k < 0 or scale <= 0:
             raise ValueError("Elo parameters must be positive (region_k may be zero)")
         self.rd = bool(rd and unit == "player")
@@ -142,6 +161,11 @@ class EloModel:
             rating += adjustment * max(0.0, 1 - played / self.move_maps)
         return rating
 
+    def _map_units(self, row, side, units):
+        if self.map_unit == "team" or self.unit == "team":
+            return (getattr(row, f"team{side}_id"),)
+        return units
+
     def _strength(self, units, rank=None):
         known = [self.ratings[p] for p in units if p in self.ratings]
         initial = (
@@ -165,6 +189,21 @@ class EloModel:
         if self.region_k:
             strength_a += self.offsets.get(home_a, 0)
             strength_b += self.offsets.get(home_b, 0)
+        map_name = getattr(row, "map", None)
+        if self.map_k > 0 and isinstance(map_name, str):
+            map_a, map_b = self._map_units(row, 1, a), self._map_units(row, 2, b)
+            strength_a += sum(
+                self.map_offsets.get(p, {}).get(map_name, 0) for p in map_a
+            ) / len(map_a)
+            strength_b += sum(
+                self.map_offsets.get(p, {}).get(map_name, 0) for p in map_b
+            ) / len(map_b)
+        if self.pick_bonus > 0:
+            picker = getattr(row, "picked_by", None)
+            if picker == 1:
+                strength_a += self.pick_bonus
+            elif picker == 2:
+                strength_b += self.pick_bonus
         # Stable logistic, algebraically the original base-ten Elo formula.
         x = (strength_a - strength_b) / self.scale
         if abs(x) < 300:
@@ -193,6 +232,15 @@ class EloModel:
             return row.score1 / (row.score1 + row.score2)
         magnitude = 0.5 * tanh(abs(row.score1 - row.score2) / self.c)
         return 0.5 + (magnitude if row.won else -magnitude)
+
+    def predict_maps(self, row, maps, picked_by=None) -> dict[str, float]:
+        """Predict map contexts without recording history; omitted picks are unknown."""
+        return {
+            name: self.predict(
+                _MapContext(row, name, picked_by.get(name) if picked_by else None)
+            )
+            for name in maps
+        }
 
     def update(self, row):
         a, b, home_a, home_b, expected = self._state(row)
@@ -223,6 +271,16 @@ class EloModel:
                     )
                     self.last_seen[player] = date
                 self.ratings[player] += change * weight
+        map_name = getattr(row, "map", None)
+        if self.map_k > 0 and isinstance(map_name, str):
+            change = self.map_k * error
+            for side, units, signed in ((1, a, change), (2, b, -change)):
+                for player in self._map_units(row, side, units):
+                    offsets = self.map_offsets.setdefault(player, {})
+                    offsets[map_name] = offsets.get(map_name, 0) + signed
+                    centre = signed / len(offsets)
+                    for name in offsets:
+                        offsets[name] -= centre
         if (
             self.region_k
             and home_a is not None
