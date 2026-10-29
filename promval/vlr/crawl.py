@@ -1,5 +1,6 @@
 """Incremental results walk; raw pages are the permanent source of truth."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -24,6 +25,7 @@ def crawl(
     max_matches=None,
     stop_after_known_pages=3,
     today=None,
+    workers=1,
 ) -> Summary:
     if max_matches is not None and max_matches < 0:
         raise ValueError("max_matches must be nonnegative")
@@ -41,44 +43,67 @@ def crawl(
         summary.pages_read += 1
         if not rows or all(r.day < since for r in rows):
             break
-        attempted = False
+        tasks = []
         for row in rows:
             if row.day < since or row.day >= today:
                 continue
-            match = cache.match_path(row.match_id)
-            economy = cache.economy_path(row.match_id)
-            need_match = not cache.has(match)
-            need_economy = row.day >= economy_since and not cache.has(economy)
+            need_match = not cache.has(cache.match_path(row.match_id))
+            need_economy = row.day >= economy_since and not cache.has(
+                cache.economy_path(row.match_id)
+            )
             if not need_match:
                 summary.skipped += 1
-            if not (need_match or need_economy):
-                continue
-            attempted = True
-            if need_match:
-                try:
-                    cache.save(
-                        match, fetcher.text(f"https://www.vlr.gg/{row.match_id}")
-                    )
-                    summary.matches_fetched += 1
-                except Exception:
-                    summary.errors += 1
-                    continue
-            if need_economy:
-                try:
-                    cache.save(
-                        economy,
-                        fetcher.text(
-                            f"https://www.vlr.gg/{row.match_id}/?game=all&tab=economy"
-                        ),
-                    )
-                    summary.economy_fetched += 1
-                except Exception:
-                    summary.errors += 1
-            if max_matches is not None and summary.matches_fetched >= max_matches:
-                return summary
+            if need_match or need_economy:
+                tasks.append((row.match_id, need_match, need_economy))
+        if max_matches is not None:
+            # Keep economy-only tasks; cap the new match pages at the remaining quota.
+            room, kept = max_matches - summary.matches_fetched, []
+            for task in tasks:
+                if task[1]:
+                    if room <= 0:
+                        continue
+                    room -= 1
+                kept.append(task)
+            tasks = kept
+        attempted = bool(tasks)
+        if workers > 1 and len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(lambda t: _fetch(fetcher, *t), tasks))
+        else:
+            results = [_fetch(fetcher, *task) for task in tasks]
+        for fetched_match, fetched_economy, errors in results:
+            summary.matches_fetched += fetched_match
+            summary.economy_fetched += fetched_economy
+            summary.errors += errors
+        if max_matches is not None and summary.matches_fetched >= max_matches:
+            return summary
         # Failed requests still count as new work, never as a known page.
         known_pages = 0 if attempted else known_pages + 1
         if known_pages >= stop_after_known_pages:
             break
         page += 1
     return summary
+
+
+def _fetch(fetcher, match_id, need_match, need_economy):
+    """Fetch and cache one match's missing pages: (match, economy, errors) counts."""
+    fetched_match = fetched_economy = errors = 0
+    if need_match:
+        try:
+            cache.save(
+                cache.match_path(match_id),
+                fetcher.text(f"https://www.vlr.gg/{match_id}"),
+            )
+            fetched_match = 1
+        except Exception:
+            return 0, 0, 1
+    if need_economy:
+        try:
+            cache.save(
+                cache.economy_path(match_id),
+                fetcher.text(f"https://www.vlr.gg/{match_id}/?game=all&tab=economy"),
+            )
+            fetched_economy = 1
+        except Exception:
+            errors += 1
+    return fetched_match, fetched_economy, errors

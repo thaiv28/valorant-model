@@ -192,7 +192,9 @@ def test_atomic_cache_and_cli(monkeypatch):
     assert list(p.parent.glob("*.tmp")) == []
     from promval.vlr.crawl import Summary
 
-    def fake(fetcher, since, economy_since, max_matches, stop_after_known_pages):
+    def fake(
+        fetcher, since, economy_since, max_matches, stop_after_known_pages, workers
+    ):
         assert since == date(2023, 1, 1) and economy_since == date(2023, 1, 1)
         assert max_matches == 0 and fetcher.min_interval == 2
         assert stop_after_known_pages == 3
@@ -220,3 +222,55 @@ def test_saved_results_page_with_fixture_fetcher():
     assert cache.load(cache.match_path(773441)) == cache.load(
         FIXTURES / "match_773441.html.gz"
     )
+
+
+def test_parallel_workers_fetch_every_page_once(tmp_path, monkeypatch):
+    import threading
+    from datetime import date
+
+    from promval.vlr.crawl import crawl
+    from promval.vlr.http import Fetcher
+
+    monkeypatch.setenv("PROMVAL_DATA", str(tmp_path))
+    results = cache.load(FIXTURES / "results_p1.html.gz")
+    seen, lock = [], threading.Lock()
+
+    def get(url):
+        with lock:
+            seen.append(url)
+        if "results" in url:
+            return results if url.endswith("page=1") else "<html></html>"
+        return "<html>match</html>"
+
+    fetcher = Fetcher(get=get, sleep=lambda s: None, min_interval=0)
+    summary = crawl(fetcher, date(2026, 10, 1), today=date(2026, 10, 29), workers=4)
+    pages = [u for u in seen if "results" not in u]
+    assert len(pages) == len(set(pages))  # no page fetched twice
+    assert summary.matches_fetched == len([u for u in pages if "economy" not in u])
+    assert summary.errors == 0
+
+
+def test_rate_limit_pauses_all_workers():
+    from urllib.error import HTTPError
+
+    from promval.vlr.http import Fetcher
+
+    clock = [0.0]
+    sleeps = []
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise HTTPError(url, 429, "slow down", None, None)
+        return "ok"
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    fetcher = Fetcher(get=get, sleep=sleep, clock=lambda: clock[0], min_interval=0.25)
+    assert fetcher.text("a") == "ok"
+    # The retry waited out the shared pause, and so does the next caller.
+    assert sum(sleeps) >= 5
+    assert fetcher._paused_until <= clock[0]
