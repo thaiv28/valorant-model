@@ -6,12 +6,13 @@ import os
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 SERIES = ("KXVALORANTGAME", "KXVALORANTMAP")
 FINAL = {"finalized", "settled"}
+HISTORIES = {"trades": ".jsonl.gz", "candles": ".json.gz"}
 
 
 def utc_now():
@@ -64,16 +65,51 @@ def _atomic_write(path, text):
         Path(name).unlink(missing_ok=True)
 
 
-def _book(client, root, ticker, now):
+def _load_manifest(root):
+    path = root / "manifest.json"
+    if not path.exists():
+        return {kind: set() for kind in HISTORIES}
+    manifest = json.loads(path.read_text())
+    if manifest["version"] != 1:
+        raise ValueError("unsupported Kalshi manifest version")
+    return {kind: set(manifest[kind]) for kind in HISTORIES}
+
+
+def _write_manifest(root, saved):
+    manifest = {"version": 1}
+    for kind, suffix in HISTORIES.items():
+        present = {
+            path.name.removesuffix(suffix)
+            for path in (root / kind).glob(f"*{suffix}")
+            if path.is_file()
+        }
+        manifest[kind] = sorted(saved[kind] | present)
+    _atomic_write(root / "manifest.json", json.dumps(manifest) + "\n")
+    return manifest
+
+
+def rebuild_manifest():
+    """Replace the manifest with only the histories present locally."""
+    return _write_manifest(data_dir(), {kind: set() for kind in HISTORIES})
+
+
+def _book(client, ticker, now):
     book = client.json(f"/markets/{ticker}/orderbook")["orderbook_fp"]
     at = now().astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-    line = json.dumps({"at": at, "orderbook_fp": book}) + "\n"
-    path = root / "books" / f"{ticker}.jsonl"
-    if path.exists():
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-    else:
-        _atomic_write(path, line)
+    return json.dumps({"at": at, "ticker": ticker, "orderbook_fp": book}) + "\n"
+
+
+def _write_books(root, snapshots, now):
+    if not snapshots:
+        return
+    stamp = now().astimezone(UTC).replace(microsecond=0)
+    # Keep distinct passes immutable even when they finish within one second.
+    while True:
+        path = root / "books" / stamp.strftime("%Y-%m-%d/%Y%m%dT%H%M%SZ.jsonl.gz")
+        if not path.exists():
+            break
+        stamp += timedelta(seconds=1)
+    _atomic_write(path, "".join(snapshots))
 
 
 def collect(client, series=SERIES, books=True, limit=None, now=utc_now) -> Summary:
@@ -81,6 +117,8 @@ def collect(client, series=SERIES, books=True, limit=None, now=utc_now) -> Summa
     if limit is not None and limit < 0:
         raise ValueError("limit must be nonnegative")
     root = data_dir()
+    saved = _load_manifest(root)
+    snapshots = []
     summary = Summary()
     fetched = 0
     for source in series:
@@ -106,9 +144,13 @@ def collect(client, series=SERIES, books=True, limit=None, now=utc_now) -> Summa
             ticker = market["ticker"]
             historical = origins[ticker] == "/historical/markets"
             if market["status"] in FINAL:
-                for kind, suffix in (("trades", ".jsonl.gz"), ("candles", ".json.gz")):
+                for kind, suffix in HISTORIES.items():
                     path = root / kind / f"{ticker}{suffix}"
-                    if path.exists() or (limit is not None and fetched >= limit):
+                    if (
+                        path.exists()
+                        or ticker in saved[kind]
+                        or (limit is not None and fetched >= limit)
+                    ):
                         continue
                     fetched += 1
                     try:
@@ -163,16 +205,18 @@ def collect(client, series=SERIES, books=True, limit=None, now=utc_now) -> Summa
                         summary.errors.append((ticker, str(exc)))
             elif market["status"] == "active" and books:
                 try:
-                    _book(client, root, ticker, now)
+                    snapshots.append(_book(client, ticker, now))
                     stats.book_snapshots += 1
                 except Exception as exc:
                     summary.errors.append((ticker, str(exc)))
+    _write_manifest(root, saved)
+    _write_books(root, snapshots, now)
     return summary
 
 
 def snapshot_books(client, series=SERIES, now=utc_now) -> int:
     root = data_dir()
-    count, errors = 0, []
+    snapshots, errors = [], []
     for source in series:
         try:
             markets = list(
@@ -189,8 +233,8 @@ def snapshot_books(client, series=SERIES, now=utc_now) -> int:
             continue
         for ticker in sorted({m["ticker"] for m in markets if m["status"] == "active"}):
             try:
-                _book(client, root, ticker, now)
-                count += 1
+                snapshots.append(_book(client, ticker, now))
             except Exception as exc:
                 errors.append((ticker, str(exc)))
-    return SnapshotCount(count, errors)
+    _write_books(root, snapshots, now)
+    return SnapshotCount(len(snapshots), errors)

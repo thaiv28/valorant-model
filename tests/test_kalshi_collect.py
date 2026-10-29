@@ -2,7 +2,7 @@
 
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
@@ -149,13 +149,19 @@ def test_collect_layout_pagination_and_idempotency(setup):
                 )["candlesticks"]
             )
         assert not (root / "books" / f"{ticker}.jsonl").exists()
+    book_paths = list((root / "books").rglob("*.jsonl.gz"))
+    assert book_paths == [root / "books/2026-10-28/20261028T231012Z.jsonl.gz"]
+    with gzip.open(book_paths[0], "rt") as handle:
+        snapshots = [json.loads(line) for line in handle]
+    assert len(snapshots) == 4
     for market in fixture("markets_open_map.json")["markets"]:
         ticker = market["ticker"]
         assert not (root / "trades" / f"{ticker}.jsonl.gz").exists()
         assert not (root / "candles" / f"{ticker}.json.gz").exists()
-        snapshot = json.loads((root / "books" / f"{ticker}.jsonl").read_text())
+        snapshot = next(row for row in snapshots if row["ticker"] == ticker)
         assert snapshot == {
             "at": "2026-10-28T23:10:12Z",
+            "ticker": ticker,
             **fixture("orderbook_open.json"),
         }
     saved = {
@@ -163,6 +169,7 @@ def test_collect_layout_pagination_and_idempotency(setup):
         for kind in ("trades", "candles")
         for p in (root / kind).iterdir()
     }
+    old_book = book_paths[0].read_bytes()
     fake.calls.clear()
     second = collect(client, now=lambda: NOW)
     assert not second.errors
@@ -173,7 +180,13 @@ def test_collect_layout_pagination_and_idempotency(setup):
     assert all(
         (p.read_bytes(), p.stat().st_mtime_ns) == old for p, old in saved.items()
     )
-    assert all(len(p.read_text().splitlines()) == 2 for p in (root / "books").iterdir())
+    assert book_paths[0].read_bytes() == old_book
+    book_paths = sorted((root / "books").rglob("*.jsonl.gz"))
+    assert len(book_paths) == 2
+    for path in book_paths:
+        with gzip.open(path, "rt") as handle:
+            assert len(handle.readlines()) == 4
+    assert not list((root / "books").rglob("*.jsonl"))
     assert not list(root.rglob("*.tmp"))
 
 
@@ -289,7 +302,12 @@ def test_snapshot_books_refreshes_and_reports_errors(setup):
     assert isinstance(count, int) and count == 3
     assert count.errors == [(fake.fail_book, "bad book")]
     assert all(q["status"] == "open" for p, q in fake.calls if p == "/markets")
-    assert len(list((root / "books").iterdir())) == 3
+    paths = list((root / "books").rglob("*.jsonl.gz"))
+    assert len(paths) == 1
+    with gzip.open(paths[0], "rt") as handle:
+        rows = [json.loads(line) for line in handle]
+    assert len(rows) == 3
+    assert fake.fail_book not in {row["ticker"] for row in rows}
     fake.fail_catalog = SERIES[0]
     count = snapshot_books(client)
     assert count == 3 and len(count.errors) == 2
@@ -356,11 +374,17 @@ def test_cli_books_loop(setup, monkeypatch):
     monkeypatch.setattr("promval.kalshi.cli.Client", lambda: client)
     monkeypatch.setattr("promval.kalshi.cli.time.monotonic", clock)
     monkeypatch.setattr("promval.kalshi.cli.time.sleep", clock.sleep)
+    monkeypatch.setattr(
+        "promval.kalshi.cli.snapshot_books",
+        lambda client: snapshot_books(
+            client, now=lambda: NOW + timedelta(seconds=clock())
+        ),
+    )
     result = CliRunner().invoke(app, ["books", "--every", "30", "--minutes", "1"])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == ["books=4 errors=0"] * 2
     assert clock.sleeps == [30, 30]
-    assert len(list((root / "books").iterdir())) == 4
+    assert len(list((root / "books").rglob("*.jsonl.gz"))) == 2
     assert CliRunner().invoke(app, ["books", "--every", "0"]).exit_code == 2
 
 
@@ -426,3 +450,85 @@ def test_http_get_headers_timeout_and_json(monkeypatch):
 
     monkeypatch.setattr("promval.kalshi.api.urlopen", urlopen)
     assert http_get(f"{API}/markets") == {"markets": []}
+
+
+def test_manifest_skip_and_union(setup):
+    fake, client, root = setup
+    ticker = fake.page2["ticker"]
+    root.mkdir()
+    old = {"version": 1, "trades": [ticker, "REMOTE"], "candles": [ticker]}
+    (root / "manifest.json").write_text(json.dumps(old))
+    (root / "trades").mkdir()
+    (root / "trades/LOCAL.jsonl.gz").write_bytes(gzip.compress(b""))
+    result = collect(client, books=False)
+    assert not result.errors
+    assert result.series[SERIES[0]].new_trade_files == 8
+    assert result.series[SERIES[0]].new_candle_files == 8
+    assert not (root / "trades" / f"{ticker}.jsonl.gz").exists()
+    assert not (root / "candles" / f"{ticker}.json.gz").exists()
+    assert not any(
+        q.get("ticker") == ticker or f"/{ticker}/candlesticks" in path
+        for path, q in fake.calls
+    )
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["version"] == 1
+    for kind, suffix in (("trades", ".jsonl.gz"), ("candles", ".json.gz")):
+        present = {p.name.removesuffix(suffix) for p in (root / kind).iterdir()}
+        assert manifest[kind] == sorted(set(old[kind]) | present)
+    assert not list(root.rglob("*.tmp"))
+
+
+def test_manifest_command_rebuilds_from_local_files(setup):
+    _, _, root = setup
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps({"version": 1, "trades": ["REMOTE"], "candles": ["REMOTE"]})
+    )
+    for kind, names in {
+        "trades": ["Z.jsonl.gz", "A.jsonl.gz", "ignored.tmp"],
+        "candles": ["B.json.gz"],
+    }.items():
+        (root / kind).mkdir()
+        for name in names:
+            (root / kind / name).write_bytes(gzip.compress(b""))
+    result = CliRunner().invoke(app, ["manifest"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "trades=2 candles=1"
+    assert json.loads((root / "manifest.json").read_text()) == {
+        "version": 1,
+        "trades": ["A", "Z"],
+        "candles": ["B"],
+    }
+
+
+def test_manifest_command_empty_archive(setup):
+    _, _, root = setup
+    result = CliRunner().invoke(app, ["manifest"])
+    assert result.exit_code == 0, result.output
+    assert json.loads((root / "manifest.json").read_text()) == {
+        "version": 1,
+        "trades": [],
+        "candles": [],
+    }
+
+
+@pytest.mark.parametrize("mode", ["collect", "snapshot", "disabled"])
+def test_zero_snapshots_write_no_book_file(setup, mode):
+    _, client, root = setup
+    if mode == "snapshot":
+        assert snapshot_books(client, series=(SERIES[0],)) == 0
+    else:
+        result = collect(client, series=(SERIES[0],), books=mode != "disabled", limit=0)
+        assert result.series[SERIES[0]].book_snapshots == 0
+    assert not (root / "books").exists()
+
+
+def test_failed_histories_are_excluded_from_manifest(setup):
+    fake, client, root = setup
+    fake.fail_trade = fake.page2["ticker"]
+    fake.empty_candles = fake.page2["ticker"]
+    result = collect(client, books=False)
+    assert len(result.errors) == 2
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert fake.page2["ticker"] not in manifest["trades"]
+    assert fake.page2["ticker"] not in manifest["candles"]
