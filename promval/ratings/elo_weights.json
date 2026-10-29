@@ -1,0 +1,16 @@
+{
+  "team_elo": {
+    "k": 32,
+    "fit_through": "2025-08-31"
+  },
+  "player_round_glicko_rookie": {
+    "k": 32,
+    "tau": 0.5,
+    "rd_new": 280,
+    "rd_info": 0.25,
+    "new_player": "teammates",
+    "rookie_penalty": 200,
+    "rookie_maps": 400,
+    "fit_through": "2025-08-31"
+  }
+}

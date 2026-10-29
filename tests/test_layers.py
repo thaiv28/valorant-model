@@ -96,7 +96,7 @@ def test_causal_homes_decay_missing_and_order():
         expected = (2 * decay**2 / (decay**2 + decay + 1) + 1) / 2
         assert features.loc[4, f"form1_{h}"] == pytest.approx(expected)
         assert features.loc[7, f"form2_{h}"] == 1
-    assert features.loc[4, "form1_5"] < features.loc[4, "form1_12"]
+    assert features.loc[4, "form1_5"] < features.loc[4, "form1_8"]
     conn.execute("UPDATE player_maps SET rating=100 WHERE game_id>=5")
     conn.execute("UPDATE maps SET score1=0,score2=13 WHERE game_id>=5")
     pd.testing.assert_frame_equal(
@@ -243,7 +243,7 @@ def test_frozen_fit_uses_only_given_rows(cls):
 def test_combination_order_and_shared_cache(combined_cls, form_cls):
     rng, frame, features, logits, effect = planted(1500)
     frame["won"] = sample(
-        rng, logits + effect + 2 * (features.form1_12 - features.form2_12)
+        rng, logits + effect + 2 * (features.form1_8 - features.form2_8)
     )
     combined = combined_cls()
     combined._features = features
@@ -320,7 +320,7 @@ def test_multi_stat_causality_nulls_and_fkfd():
     conn.execute("UPDATE player_maps SET acs=NULL WHERE game_id=2")
     conn.execute("UPDATE player_maps SET fk=NULL WHERE game_id=1 AND player_id=100")
     features = causal_features(conn, lineups)
-    assert HALF_LIVES == (2, 3, 5, 8, 12)
+    assert HALF_LIVES == (3, 5, 8, 12, 20, 40, 80)
     for h in HALF_LIVES:
         for stat in FORM_STATS:
             assert np.isnan(features.loc[1, f"form1_{stat}_{h}"])

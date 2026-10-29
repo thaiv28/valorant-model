@@ -458,8 +458,8 @@ def test_rookie_moves_registry_exact_grids(variant):
         grid.update(
             k=(32,),
             rd_new=(280,),
-            rookie_penalty=(150, 200, 300, 400, 600),
-            rookie_maps=(50, 100, 200, 400),
+            rookie_penalty=(50, 100, 150, 200, 300),
+            rookie_maps=(100, 200, 400, 800),
         )
     if "moves" in variant:
         grid.update(move_up_penalty=(50, 100, 200), move_down_bonus=(0, 50))
