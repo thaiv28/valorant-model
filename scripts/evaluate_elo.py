@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 
@@ -33,15 +34,44 @@ from promval.ratings.regions import macro_region
 from promval.ratings.replay import load_lineups, load_maps, replay
 
 
-def candle_quote(candles, start_utc):
-    """Last valid bid/ask close at or before match start, in dollar units."""
+@dataclass(frozen=True)
+class QuoteRule:
+    """Which hourly quote stands for the price a bot could have traded.
+
+    `tradeable` (the default for reports): the first candle ending at least
+    `open_delay_minutes` after the market opened, no later than `buffer_hours` before the
+    scheduled start (so no veto or lineup news), whose bid/ask spread is at most
+    `max_spread`. `prestart`: the last candle ending at or before the start,
+    which can already price the veto.
+    """
+
+    mode: str = "prestart"
+    max_spread: float = 0.06
+    open_delay_minutes: float = 30.0
+    buffer_hours: float = 2.0
+
+
+PRESTART = QuoteRule()
+TRADEABLE = QuoteRule("tradeable")
+
+
+def candle_quote(candles, start_utc, open_time=None, rule=PRESTART):
+    """(bid, ask) closes in dollars under `rule`, or None when no candle qualifies."""
     if isinstance(candles, dict):
         candles = candles.get("candlesticks", [])
-    cutoff = pd.Timestamp(start_utc).timestamp()
+    start = pd.Timestamp(start_utc)
+    if rule.mode == "tradeable":
+        if open_time is None:
+            return None
+        delay = pd.Timedelta(minutes=rule.open_delay_minutes)
+        earliest = (pd.Timestamp(open_time) + delay).timestamp()
+        cutoff = (start - pd.Timedelta(hours=rule.buffer_hours)).timestamp()
+    else:
+        earliest, cutoff = float("-inf"), start.timestamp()
     valid = []
     for candle in candles:
         end = candle.get("end_period_ts")
-        if end is None or end > cutoff:
+        if end is None or end > cutoff or end < earliest:
             continue
         closes = []
         for side in ("yes_bid", "yes_ask"):
@@ -57,8 +87,16 @@ def candle_quote(candles, start_utc):
                 break
             closes.append(value)
         if len(closes) == 2:
+            if rule.mode == "tradeable" and not (
+                0 < closes[0] < closes[1] < 1
+                and closes[1] - closes[0] <= rule.max_spread + 1e-9
+            ):
+                continue
             valid.append((end, tuple(closes)))
-    return max(valid, key=lambda item: item[0])[1] if valid else None
+    if not valid:
+        return None
+    pick = min if rule.mode == "tradeable" else max
+    return pick(valid, key=lambda item: item[0])[1]
 
 
 def candle_mid(candles, start_utc):
@@ -80,14 +118,14 @@ def series_rows(maps):
     return first
 
 
-def kalshi_rows(conn, maps, series, directory):
+def kalshi_rows(conn, maps, series, directory, rule=PRESTART):
     """One usable market per event, preferring the team1-side contract."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     if not {"kalshi_links", "kalshi_markets", "team_aliases"} <= tables:
         return pd.DataFrame()
     markets = pd.read_sql(
         """SELECT l.event_ticker, l.match_id, l.game_id, l.kind,
-                  k.ticker, a.vlr_team_id
+                  k.ticker, k.open_time, a.vlr_team_id
            FROM kalshi_links l JOIN kalshi_markets k USING (event_ticker)
            JOIN team_aliases a USING (competitor_id)
            WHERE l.match_id IS NOT NULL ORDER BY k.ticker""",
@@ -113,7 +151,9 @@ def kalshi_rows(conn, maps, series, directory):
         if not path.exists():
             continue
         with gzip.open(path, "rt") as handle:
-            quote = candle_quote(json.load(handle), row.start_utc)
+            quote = candle_quote(
+                json.load(handle), row.start_utc, market.open_time, rule
+            )
         if quote is None:
             continue
         bid, ask = quote
@@ -328,9 +368,18 @@ def main(argv=None):
     parser.add_argument("--k-grid", help="optional K grid override for every model")
     parser.add_argument("--score-from", default="2023-01-01")
     parser.add_argument("--blend-min", type=int, default=100)
+    parser.add_argument(
+        "--quote",
+        choices=("tradeable", "prestart"),
+        default="tradeable",
+        help="Kalshi price: first tight quote ≥30 min after listing and ≥2 h "
+        "before start (default), or the last candle before start",
+    )
+    parser.add_argument("--max-spread", type=float, default=0.06)
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
+    quote_rule = QuoteRule(args.quote, max_spread=args.max_spread)
     try:
         k_grid = (
             None
@@ -444,8 +493,16 @@ def main(argv=None):
                 f"{mean_loss(series_rows(scored_rows(winners[name], args.score_from))):.6f} | {len(tuning_maps)} |"
                 for name in ranked
             ),
-            "Kalshi uses the last valid hourly bid/ask midpoint ending at or before match start, "
-            "oriented to team1 using aliases. One contract per event, preferring team1. "
+            (
+                f"Kalshi uses the first hourly bid/ask (midpoint for log loss, ask/bid for bets) "
+                f"ending ≥30 min after the market opened and ≥2 h before the scheduled start, "
+                f"with a spread ≤ {args.max_spread:.2f}: a price a bot could trade before any veto. "
+                "Markets without such a quote are skipped. "
+                if args.quote == "tradeable"
+                else "Kalshi uses the last valid hourly bid/ask midpoint ending at or before "
+                "match start (can already price the veto). "
+            )
+            + "oriented to team1 using aliases. One contract per event, preferring team1. "
             "Compare identical rows; map predictions use the first map's pre-match chance. "
             "Missing links, aliases or candles are skipped. Backtests are in-sample on the tuning window "
             "(parameters were selected there). Fills are assumed at the hourly candle’s ask/bid with "
@@ -461,7 +518,9 @@ def main(argv=None):
         for name in detailed:
             source = winners[name]
             source = source[pd.to_datetime(source.start_utc, utc=True) >= score_start]
-            market = kalshi_rows(conn, source, series_rows(source), data_dir())
+            market = kalshi_rows(
+                conn, source, series_rows(source), data_dir(), quote_rule
+            )
             blended_markets[name], monthly_fits[name] = walk_forward(
                 market, args.score_from, args.blend_min
             )
