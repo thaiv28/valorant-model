@@ -15,6 +15,9 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 | `tests/test_kalshi_collect.py` | Offline fixture-based collector and CLI tests |
 | `promval/vlr/` | VLR.gg crawler, raw cache and parsers |
 | `scripts/001_create_tables.sql`, `002_load_vlr.py`, `003_events.py`, `004_map_pool.py`, `setup_db.sh` | Rebuild SQLite from VLR cache |
+| `promval/link.py` | Pure team normalization, event linking and settlement checks |
+| `scripts/005_load_kalshi.py`, `006_link_kalshi.py` | Load catalogs, learn aliases and link Kalshi to VLR |
+| `tests/test_link.py` | Offline linking and catalog-to-DB checks |
 | `scripts/work_log.py`, `.githooks/` | Work-log tooling |
 | `tests/test_vlr_*.py` | Offline parser, crawl and DB checks |
 | `tests/test_steering.py` | Doc guard |
@@ -59,3 +62,13 @@ Tables: `matches` (match_id), `vetoes` (match_id/step), `maps` (game_id), `round
 Time gotcha: VLR `data-utc-ts` is America/New_York local time, despite its name. Convert with zoneinfo (EST/EDT) to ISO UTC ending Z.
 
 Backfill estimate: roughly 590 results pages back to 2021, about 29k matches; approximately two requests per match from 2023 and one before, at 2 seconds, roughly a day of crawling. Not run against the live site.
+
+## Kalshi ↔ VLR links
+
+The numbered DB build loads `kalshi_markets` from `collect.data_dir()/markets/{KXVALORANTGAME,KXVALORANTMAP}.json`; missing catalogs load zero rows with a message. Rules supply scheduled EDT/EST times (UTC Z) and event names; ticker suffixes supply team codes and map numbers.
+
+`team_aliases` maps consistent competitor UUIDs to VLR team IDs, with names, codes and confident-series evidence counts; conflicting UUIDs are permanently dropped. `kalshi_links` stores one row per event, match/game IDs, kind, method and failure reason.
+
+Candidates start within ±30 hours of the advertised schedule (otherwise open time +24 hours), allowing a one-day slip. Exact → alias → anchor passes repeat until no new link is made, re-deriving aliases from every confident link. Exact matching accepts either the outside name or the alternate inside a trailing parenthetical. Alias matching requires both UUIDs. An anchor requires one exact/aliased team appearing in only one candidate match; the other name must share normalized tokens, match team-code initials/a token, or have difflib similarity ≥0.6. Prefer an exact other-side name present in the window over a looser subteam name; competing matches remain ambiguous. Finally both fuzzy name similarities must reach 0.8, without overriding that preference. Normalization removes accents and generic organization words and equates female/women/GC. Map events inherit their series match (map-only catalogs use a representative map event), then select the played map by order; missing rows are `unplayed`.
+
+Cross-check each linked binary settled market against the series/map winner; skip scalar settlements and unknown winners. `db/link_report.txt` lists unlinked events/unplayed maps with team names, schedule, event name and reason; anchor name mappings; and mismatched tickers with VLR IDs. The linker prints linked/total series and maps, aliases, market agreements/checked and mismatches. Re-runs replace derived rows. The Aug 18–Oct 27, 2026 catalog window linked 194/252 series against 233 cached matches before anchor/variant improvements. Settlement checks agreed on 1256/1264; eight disagreements came from the subsequently fixed VLR map ordering bug. Updated coverage is pending.
