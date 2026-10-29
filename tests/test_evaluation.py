@@ -242,6 +242,8 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
         str(ROOT / "scripts/evaluate_elo.py"),
         "--db",
         str(path),
+        "--quote",
+        "prestart",
         "--out",
         str(report_path),
         "--k-grid",
@@ -311,6 +313,8 @@ def test_empty_windows_and_invalid_selection(database, tmp_path, monkeypatch):
     args = [
         "--db",
         str(path),
+        "--quote",
+        "prestart",
         "--out",
         str(tmp_path / "report.md"),
         "--models",
@@ -340,6 +344,8 @@ def test_baseline_always_included(database, tmp_path, monkeypatch):
         [
             "--db",
             str(path),
+            "--quote",
+            "prestart",
             "--out",
             str(tmp_path / "report.md"),
             "--models",
@@ -372,6 +378,8 @@ def test_glicko_report_default_and_explicit_models(
     args = [
         "--db",
         str(path),
+        "--quote",
+        "prestart",
         "--out",
         str(out),
         "--models",
@@ -511,6 +519,8 @@ def test_end_to_end_fitted_blend(database, tmp_path, monkeypatch):
         [
             "--db",
             str(path),
+            "--quote",
+            "prestart",
             "--out",
             str(report_path),
             "--models",
@@ -534,3 +544,35 @@ def test_end_to_end_fitted_blend(database, tmp_path, monkeypatch):
     loss = report.split("#### Log loss vs Kalshi (blended)")[1]
     assert "| series | all | 1 |" in loss
     assert "| map | all | 1 |" in loss
+
+
+def _candle(end, bid, ask):
+    return {
+        "end_period_ts": end,
+        "yes_bid": {"close_dollars": f"{bid:.4f}"},
+        "yes_ask": {"close_dollars": f"{ask:.4f}"},
+    }
+
+
+def test_tradeable_quote_is_first_tight_quote_before_veto_window():
+    """The bot's price: first candle >=30 min after listing, spread <= max, and
+    >=2 h before the scheduled start; never the pre-start (veto) candle."""
+    opened = pd.Timestamp("2026-03-01T00:00:00Z")
+    start = pd.Timestamp("2026-03-03T00:00:00Z")
+    hour = 3600
+    t0 = int(opened.timestamp())
+    candles = [
+        _candle(t0 + 0 * hour, 0.40, 0.45),  # before open + 30 min
+        _candle(t0 + 1 * hour, 0.01, 0.95),  # empty book: spread too wide
+        _candle(t0 + 2 * hour, 0.50, 0.55),  # first tradeable quote
+        _candle(t0 + 3 * hour, 0.52, 0.54),
+        _candle(int(start.timestamp()) - 1800, 0.70, 0.71),  # inside the 2 h buffer
+    ]
+    rule = benchmark.TRADEABLE
+    assert benchmark.candle_quote(candles, start, opened, rule) == (0.50, 0.55)
+    # The old rule takes the last candle before start, which may price the veto.
+    assert benchmark.candle_quote(candles, start) == (0.70, 0.71)
+    # No open time or no qualifying candle: skipped.
+    assert benchmark.candle_quote(candles, start, None, rule) is None
+    tight = benchmark.QuoteRule("tradeable", max_spread=0.01)
+    assert benchmark.candle_quote(candles, start, opened, tight) is None
