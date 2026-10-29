@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Rating reversion toward the mean
+
+Branch `revert`, base `main`. Added off-by-default player season/inactivity reversion toward the initial rating, separate update dates, non-mutating prediction calculations, and the fixed-base `player_round_glicko_rookie_revert` grid (40 candidates). Existing defaults retain exact synthetic predictions; RD behavior is unchanged. Tests cover boundaries, UTC offsets, multiplicative decay, teammate initialization, prediction/update agreement, validation and registry parameters with RD on/off. Documented formulas/defaults/grid. Checks: full suite passed (347 tests, 26.20 s); Ruff format/check passed. Benchmark: stage 1 chose a 0.2 pull at Jan 1, no inactivity pull (−0.0006 [−0.0013, −0.0000]); stage 2 −0.0007 (n.s.) with GC significantly worse (+0.0040). Not adopted; left off.
+
 ## 2026-10-29 — Map strength offsets and pick bonus
 
 Branch `map-strength`, base `main`. Added optional centred per-player/team map offsets, picker strength bonuses, and `predict_maps` without history mutation. Replay loads picked_by; two registry variants fix the adopted rookie/RD base and vary map/pick parameters. Tests cover centring, keys, update expectations, missing context, prediction state, exact default predictions, registry grids and SQL loading. Checks: 293 tests passed (24.14 s); `uv run --no-sync pytest -q`, Ruff format/check and `git diff --check` passed. Plain `uv run` crashed in macOS configuration; offline/no-sync runs passed. Grids rescaled after a first run (round-level points amplify ~3× into map odds): map_k {0.5,1,2,4}, pick_bonus {1,2,3,5,8}. Verdict: both rejected (gains below 0.0005); left off.
