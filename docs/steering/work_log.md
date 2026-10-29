@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Retry dropped VLR connections
+
+Branch `crawl-retry`, base `main`. The 4-worker crawl stopped at 18,147 match pages on `RemoteDisconnected` (VLR closed a connection), which the fetcher didn't retry. It now retries `ConnectionError` and `http.client.HTTPException` with the same shared backoff as 429/5xx. Checks: pytest, ruff.
+
 ## 2026-10-29 — Stage-1 series temperature
 
 Branch `series-temp`, base `main`. The series check showed independent-map series odds are too extreme (Bo3: 5% predicted → 10% won, 96% → 90%). `evaluate_elo.py` now fits, per model and best-of (Bo3, Bo5; ≥ 30 rows, grid 0.40–1.50), a temperature T on stage-1 series log loss and applies p′ = σ(T·logit p) to every series probability (series metrics, Kalshi series comparison, returns); Bo1 unchanged. Layer variants fit their own T on layered stage-1 rows. `--no-series-temperature` restores the old odds. Result (`rookie+form`): T = 0.79 Bo3, 0.68 Bo5; stage-2 series log loss −0.0050 [−0.0088, −0.0011]. Checks: pytest (261), ruff.
