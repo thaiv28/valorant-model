@@ -46,3 +46,12 @@ def crawl(
         f"pages={result.pages_read} matches={result.matches_fetched} "
         f"economy={result.economy_fetched} skipped={result.skipped} errors={result.errors}"
     )
+
+
+@app.command()
+def events():
+    """Refresh all event tier listings (about two minutes)."""
+    from promval.vlr.events import crawl_events
+
+    result = crawl_events(Fetcher())
+    typer.echo(f"pages={result.pages_read} events={result.events}")
