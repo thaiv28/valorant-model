@@ -6,9 +6,11 @@
 
 - Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (run manually; not scheduled). The first full backfill was started 2026-10-28.
 - VLR: raw cache, parsers and `scripts/setup_db.sh`; a live sample of 27 matches (2021–2026) parsed with no errors. The full backfill has not run.
+- Events: tier lists and overrides build `events`; seven-map vetoes build pool periods and map active spans offline via `setup_db.sh`.
 
 ## Known limits
 
+- VLR's VCT tier includes some tier-2 events; sections are coarse, refine via overrides. Pool history reflects observed vetoes, not exact patch boundaries.
 - Order-book history exists only from when snapshots run.
 - VLR's economy tab has eco/half/full buy categories (no separate semi-eco/semi-buy) and omits overtime rounds.
 - Some player rows have no rating (70 of 560 in the sample).
@@ -16,6 +18,6 @@
 ## Future work
 
 - Schedule the Kalshi collector (storage needs a decision: S3 via the infrastructure repo, or local).
-- Run the VLR backfill (`promval vlr crawl --since 2021-01-01 --full`); add event tiers and team aliases.
-- bo3.gg cross-check; Liquipedia rosters and map pool.
+- Run the VLR backfill (`promval vlr crawl --since 2021-01-01 --full`); add team aliases.
+- bo3.gg cross-check; Liquipedia rosters and map-pool cross-check.
 - Elo v1 and the benchmark harness (design plan Phase 2).

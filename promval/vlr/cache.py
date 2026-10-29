@@ -37,3 +37,7 @@ def save(path: Path, text: str) -> None:
 
 def load(path: Path) -> str:
     return gzip.decompress(path.read_bytes()).decode("utf-8")
+
+
+def events_path(tier: int, page: int) -> Path:
+    return root() / "events" / f"tier{tier}_p{page}.html.gz"

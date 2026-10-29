@@ -14,7 +14,7 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 | `promval/kalshi/cli.py` | Collector and book-loop commands |
 | `tests/test_kalshi_collect.py` | Offline fixture-based collector and CLI tests |
 | `promval/vlr/` | VLR.gg crawler, raw cache and parsers |
-| `scripts/001_create_tables.sql`, `002_load_vlr.py`, `setup_db.sh` | Rebuild SQLite from VLR cache |
+| `scripts/001_create_tables.sql`, `002_load_vlr.py`, `003_events.py`, `004_map_pool.py`, `setup_db.sh` | Rebuild SQLite from VLR cache |
 | `scripts/work_log.py`, `.githooks/` | Work-log tooling |
 | `tests/test_vlr_*.py` | Offline parser, crawl and DB checks |
 | `tests/test_steering.py` | Doc guard |
@@ -38,6 +38,10 @@ New files and refreshed catalogs use temporary files plus atomic rename. Only fi
 The standard-library client uses a repository User-Agent, 30-second timeout and at least 0.06 seconds between requests. HTTP 429/5xx, URL errors and timeouts retry up to five attempts with 1/2/4/8-second backoff. First-run estimate: about 10k final markets × two requests at ~0.06-second spacing plus latency, roughly an hour; pagination and retries can add time.
 
 ## VLR scraper
+
+`uv run promval vlr events` refreshes all tier lists: 60 VCT, 61 VCL, 62 T3, 63 GC, 64 Collegiate, 67 Offseason. Pages stop at the first empty list; `raw/events/tier<T>_p<N>.html.gz` is overwritten each run, obsolete trailing pages removed. Cost: ≈63 pages ≈2 min at 2 s/request. `003_events.py` builds the union into `events` (event_id, slug, name, primary vlr_tier, section, JSON tiers, international, status, dates, region, prize); no cache creates an empty table. Primary priority: 60, 63, 61, 67, 62, 64; sections: vct, gc, vcl, offseason, t3, collegiate. International names match Masters followed by a city, Valorant Champions <year>, Champions Tour <year>: Champions, LOCK//IN or Esports World Cup. Regional names ending in Masters do not match. `promval/vlr/event_overrides.json` applies international/section overrides by event ID last.
+
+`004_map_pool.py` builds `veto_pools` (match_id, start_utc, sorted comma-joined pool) from exactly seven distinct veto maps. `map_pool_periods` (pool, first_utc, last_utc, matches) merges consecutive pools in VCT start order (all matches only when events is empty). Runs shorter than three join the preceding stable pool, or the next at the start; without a stable run, use the longest run's pool. View `map_pool` merges each map's adjacent active spans. Endpoints are inclusive observed times, not patch dates.
 
 Run `uv run promval vlr crawl --since 2021-01-01`; options: `--economy-since 2023-01-01`, `--max-matches N`, `--min-interval 2.0`, `--full` (walk back to `--since` past cached pages; use it to resume an interrupted backfill, since a normal run stops after 3 pages with nothing new). Build offline with `bash scripts/setup_db.sh`; it deletes and rebuilds `db/valorant.db` in numeric script order. Failures roll back one match, continue, and log to `db/parse_errors.txt`.
 
