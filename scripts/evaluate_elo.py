@@ -255,7 +255,7 @@ def market_tables(frame, probability="p"):
         "|---|---|---:|---:|---:|---|---|",
     ]
     bet_lines = [
-        "| Kind | Slice | Bets | Matches | Mean edge | Flat ROI [95% interval] | Kelly final ($50 start) | Multiple | Max drawdown | Largest stake |",
+        "| Kind | Slice | Bets | Matches | Mean edge | Flat ROI [95% interval] | Kelly, LoL caps ($50 start) | Multiple | Max drawdown | Largest stake |",
         "|---|---|---:|---:|---:|---|---:|---:|---:|---:|",
     ]
     for kind, label, rows in market_slices(frame):
@@ -284,6 +284,16 @@ def market_tables(frame, probability="p"):
             f"${stats['bankroll']:.2f} | {stats['multiple']:.3f}× | "
             f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} |"
         )
+    # Prometheus caps apply per fixture across its series and map markets.
+    stats = summarize(frame, probability=probability)
+    if stats["bets"]:
+        bet_lines.append(
+            f"| series+map | all | {stats['bets']} | {stats['matches']} | "
+            f"{stats['mean_edge']:.4f} | {stats['flat_roi']:.2%} "
+            f"[{stats['roi_low']:.2%}, {stats['roi_high']:.2%}] | "
+            f"${stats['bankroll']:.2f} | {stats['multiple']:.3f}× | "
+            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} |"
+        )
     return "\n".join(loss_lines), "\n".join(bet_lines)
 
 
@@ -292,7 +302,7 @@ def summary_table(markets):
         f"{kind}{suffix} {metric}"
         for suffix in ("", " blended")
         for kind in ("Series", "Map")
-        for metric in ("Δ log loss", "flat ROI", "Kelly $")
+        for metric in ("Δ log loss", "flat ROI", "Kelly (LoL caps) $")
     ]
     lines = ["| Model | " + " | ".join(labels) + " |", "|---|" + "---:|" * len(labels)]
     for name, frame in markets.items():

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 
 # Bump whenever any parser's output changes; invalidates the parsed cache.
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 
 class ParseError(ValueError):
@@ -80,6 +80,7 @@ class MapResult:
     duration: str | None
     players: list[PlayerMap]
     rounds: list[Round]
+    picked_by: int | None = None  # 1 or 2 for a picked map; None for a decider
 
 
 @dataclass
@@ -260,7 +261,15 @@ def _map(game, order, match_id):
         _text(header.select_one(".map-duration")) or None,
         _players(game),
         rounds,
+        _picker(header),
     )
+
+
+def _picker(header):
+    """VLR marks the picking side on the PICK badge: `picked mod-1` / `mod-2`."""
+    badge = header.select_one(".picked")
+    classes = badge.get("class", []) if badge else []
+    return 1 if "mod-1" in classes else 2 if "mod-2" in classes else None
 
 
 def parse_match(html: str, match_id: int) -> Match:

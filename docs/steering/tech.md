@@ -78,7 +78,7 @@ Cross-check each linked binary settled market against the series/map winner; ski
 
 ## Ratings and benchmark
 
-Kalshi price (`--quote`): `tradeable` (default) = first hourly bid/ask ending ≥30 min after the market opened and ≥2 h before the scheduled start with spread ≤ `--max-spread` (0.06), i.e. a price a bot could trade before any veto; markets without one are skipped. `prestart` = last candle before start (can price the veto; comparison only).
+Kalshi price (`--quote`): `tradeable` (default) = first hourly bid/ask ending ≥30 min after the market opened and ≥2 h before the scheduled start with spread ≤ `--max-spread` (0.06), i.e. a price a bot could trade before any veto; markets without one are skipped. `prestart` = last candle before start (can price the veto; comparison only). Returns use Prometheus's pregame caps (`LOL_SIZING`): full Kelly, ≤10% of capital and ≤$250 per fixture, $250 per order, $1k exposure, $2k per day, day bets sized from opening capital; `sizing="full"` is uncapped.
 
 Built: `coin` (0.5), v1 `team_elo`, 11 composable variants `<unit>_<credit>[_region]`, and two player RD combinations; `team_binary` is named `team_elo`. Initial ratings 1500, scale 400. Replay by (match start UTC, match_id, map order), predict before update. Chronologically loaded replays take O(maps); lineup/home history uses bounded work per map. Factories receive `load_lineups` starters; `load_maps` includes round scores and event host/international fields.
 

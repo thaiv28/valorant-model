@@ -15,7 +15,7 @@ CREATE TABLE vetoes (
 );
 CREATE TABLE maps (
     game_id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL REFERENCES matches(match_id),
-    "order" INTEGER NOT NULL, map TEXT NOT NULL, picked INTEGER NOT NULL,
+    "order" INTEGER NOT NULL, map TEXT NOT NULL, picked INTEGER NOT NULL, picked_by INTEGER CHECK (picked_by IN (1, 2)),
     score1 INTEGER NOT NULL, score2 INTEGER NOT NULL,
     team1_atk INTEGER, team1_def INTEGER, team2_atk INTEGER, team2_def INTEGER,
     overtime INTEGER NOT NULL, duration TEXT,
