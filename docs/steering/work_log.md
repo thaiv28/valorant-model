@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Series momentum chain
+
+Branch `momentum`, base `main`. Added exact two-state series/slot odds and stage-1 momentum MLE using first-map probabilities. The optional benchmark flag fits each model/layer separately, then refits temperatures; Kalshi map markets use slot chances conditional on being played. Added `series_odds.py` for frozen stage comparisons, clustered intervals and calibration. Real DB: m=0.196441; m+T versus T series log-loss Δ +0.000005 stage 1, +0.000162 [+0.000028,+0.000299] stage 2; later-map slot Δ +0.001640. Checks: pytest, ruff format/check, diff check, real-DB report. Observed CI timing: 262 existing tests 24.42s → 270 tests 24.57s; 8 added tests alone 1.57s. Used `UV_OFFLINE=1 UV_NO_SYNC=1` after uv's local startup panic. Verdict: rejected (no gain over the temperature; slot odds worse); flag stays off. Limits: holdout unopened.
+
 ## 2026-10-29 — Full-crawl two-stage benchmark
 
 Branch `full-rerun`, base `main`. Rebuilt the DB from the complete crawl (28,770 matches from 2021; 12 min) and reran the two-stage benchmark (stage 1 2023 – Aug 2025, 25,649 maps). Widened grids where choices hit edges: rookie_penalty {50,100,150,200,300}, rookie_maps {100,200,400,800}, form H {3,…,80}. Adopted rookie 200/400 (stage 2 −0.0044, significant). Dropped form (H drifts to 80; stage 2 flat, VCL significantly worse) and regional (no gain). Wrote `elo_weights.json`. Vs Kalshi: depth-capped series+map flat ROI +30.5% [+11.7, +53.2], Kelly $50 → $450. Report and ledger updated. Checks: pytest, ruff, `evaluate_elo.py` (3.7 min). Limits: holdout unopened; weights omit the series temperature.
