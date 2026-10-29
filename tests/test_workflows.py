@@ -31,7 +31,7 @@ def test_kalshi_manifest_guard_and_upload():
 
 def test_site_workflow_safeguards():
     for name, cron, timeout in (
-        ("refresh-db", "41 * * * *", 45),
+        ("refresh-db", "41 * * * *", 90),
         ("feed", "7 * * * *", 15),
     ):
         text = (WORKFLOW.parent / f"{name}.yml").read_text()
@@ -61,6 +61,8 @@ def test_refresh_db_storage_and_incremental_crawl():
     assert '--exclude "books/*"' in text
     assert "--size-only" in text
     assert "actions/cache/restore@v4" in text and "actions/cache/save@v4" in text
+    # Save the raw cache before the DB build, so a slow build can't lose a seed.
+    assert text.index("actions/cache/save@v4") < text.index("name: Build DB")
     assert text.count("key: raw-${{ github.run_id }}") == 2
     assert "restore-keys: raw-" in text
     assert "-newer" in text and "cache-matched-key" in text

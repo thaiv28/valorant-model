@@ -20,7 +20,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       BUCKET: ${{ vars.DATA_BACKUP_BUCKET }}
     steps:
@@ -45,24 +45,23 @@ jobs:
           mkdir -p data/vlr data/kalshi
           find data/vlr data/kalshi -type f -printf '%p %s %T@\n' | sort > "$RUNNER_TEMP/raw-before"
       - name: Top up raw cache
+        env:
+          RESTORED_KEY: ${{ steps.raw.outputs.cache-matched-key }}
         run: |
           aws s3 sync "s3://$BUCKET/valorant-model/vlr" data/vlr --only-show-errors
           aws s3 sync "s3://$BUCKET/valorant-model/kalshi" data/kalshi --only-show-errors --exclude "books/*"
+          # S3 sets every mtime to its upload time, which can leave parsed pickles
+          # older than their raw pages; they were valid when uploaded, so mark them
+          # newer on a cache miss (a restored cache keeps its times; pages the crawl
+          # changes next are newer again and reparse).
+          if [ -z "$RESTORED_KEY" ]; then
+            find data/vlr/parsed -type f -exec touch {} + 2>/dev/null || true
+          fi
       - name: Crawl
         run: |
           uv run promval vlr crawl --since 2021-01-01 | tee "$RUNNER_TEMP/crawl.log"
           tail -n 1 "$RUNNER_TEMP/crawl.log" >> "$GITHUB_STEP_SUMMARY"
           aws s3 sync data/vlr "s3://$BUCKET/valorant-model/vlr" --size-only --only-show-errors
-      - name: Build DB
-        run: |
-          started=$SECONDS
-          bash scripts/setup_db.sh
-          echo "DB build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
-      - name: Save ratings snapshot
-        run: |
-          uv run promval feed-state | tee "$RUNNER_TEMP/state.log"
-          tail -n 1 "$RUNNER_TEMP/state.log" >> "$GITHUB_STEP_SUMMARY"
-          aws s3 cp data/feed/state.pkl.gz "s3://$BUCKET/valorant-model/feed/state.pkl.gz" --only-show-errors
       - name: Check raw cache changes
         id: changed
         env:
@@ -81,3 +80,13 @@ jobs:
             data/vlr
             data/kalshi
           key: raw-${{ github.run_id }}
+      - name: Build DB
+        run: |
+          started=$SECONDS
+          bash scripts/setup_db.sh
+          echo "DB build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save ratings snapshot
+        run: |
+          uv run promval feed-state | tee "$RUNNER_TEMP/state.log"
+          tail -n 1 "$RUNNER_TEMP/state.log" >> "$GITHUB_STEP_SUMMARY"
+          aws s3 cp data/feed/state.pkl.gz "s3://$BUCKET/valorant-model/feed/state.pkl.gz" --only-show-errors

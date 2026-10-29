@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — refresh-db: save the raw cache before the DB build
+
+Branch `game-feed`, base `main`. The first `refresh-db` run spent 35 min seeding ~1 GB from S3, then timed out (45 min) in the DB build, so the Actions cache was never saved. The raw cache is now saved right after the crawl; on a cache miss, parsed pickles are touched after the S3 download (S3 sets mtimes to upload time, which made valid pickles look older than their raw pages and forced a full reparse); timeout 90 min. Checks: workflow tests (new order guard), YAML parse. Run timing to follow on GitHub.
+
 ## 2026-10-29 — Snapshot site feed workflows
 
 Branch `game-feed`, base phase-1 commit `45b5ba5`. Split DB replay/closing quotes into an atomic, versioned gzip-pickle snapshot; exports load it without SQLite. Added hourly refresh-db and 10-minute feed dispatch workflows (GitHub schedules are backups), raw Actions cache and conditional S3 prediction-log persistence. S3: `valorant-model/{vlr/,kalshi/,feed/{state.pkl.gz,predictions.json,valorant.json.gz,upcoming/}}`. Checks: offline/no-sync uv pytest (369 passed, 27.81 s), Ruff format/check, shell syntax, diff check and real-DB snapshot/export passed; 1,890,179-byte state built in 3.83 s; export 0.54 s versus DB 4.68 s, identical after removing generated. Plain uv startup panics on macOS. Limits: workflows not yet run on GitHub; runner times unmeasured; raw cache must be seeded in S3 once. No network or commits. Merged main: the feed now replays the adopted `player_round_glicko_rookie_tier_revert`; its stage-1 series temperatures (Bo3 0.91, Bo5 0.84, from docs/elo_backtest.md) are stored in elo_weights.json.
