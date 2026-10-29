@@ -60,3 +60,19 @@ for region in (False, True):
     }
     if region:
         PARAM_GRIDS[name]["region_k"] = (2, 4)
+
+for variant in ("rookie", "moves", "rookie_moves"):
+    name = f"player_round_glicko_{variant}"
+    MODELS[name] = partial(EloModel, unit="player", credit="round", rd=True)
+    grid = {
+        "k": (32, 48),
+        "tau": (0.4, 0.5),
+        "rd_new": (280, 350),
+        "rd_info": (0.25,),
+        "new_player": ("teammates",),
+    }
+    if "rookie" in variant:
+        grid.update(rookie_penalty=(50, 100, 200), rookie_maps=(30, 100))
+    if "moves" in variant:
+        grid.update(move_up_penalty=(50, 100, 200), move_down_bonus=(0, 50))
+    PARAM_GRIDS[name] = grid
