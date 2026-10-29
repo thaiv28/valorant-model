@@ -72,7 +72,12 @@ for variant in ("rookie", "moves", "rookie_moves"):
         "new_player": ("teammates",),
     }
     if "rookie" in variant:
-        grid.update(rookie_penalty=(50, 100, 200), rookie_maps=(30, 100))
+        grid.update(
+            k=(32,),
+            rd_new=(280,),
+            rookie_penalty=(150, 200, 300, 400, 600),
+            rookie_maps=(50, 100, 200, 400),
+        )
     if "moves" in variant:
         grid.update(move_up_penalty=(50, 100, 200), move_down_bonus=(0, 50))
     PARAM_GRIDS[name] = grid

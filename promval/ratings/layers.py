@@ -5,7 +5,8 @@ import pandas as pd
 
 from promval.ratings.regions import REGION_CODES, macro_region
 
-HALF_LIVES = (5, 10, 20)
+HALF_LIVES = (2, 3, 5, 8, 12)
+FORM_STATS = ("rating", "acs", "kast", "adr", "fkfd")
 REGIONS = tuple(REGION_CODES)
 
 
@@ -13,7 +14,7 @@ def causal_features(conn, lineups):
     """Pre-map homes and player form; age counts each player's map appearances.
 
     Read all maps (including unscored maps), emit features before updating history,
-    and decay null-rating appearances without adding an observation.
+    and decay null-stat appearances without adding an observation.
     """
     maps = conn.execute(
         '''SELECT g.game_id, m.team1_id, m.team2_id, e.region,
@@ -23,10 +24,10 @@ def causal_features(conn, lineups):
            ORDER BY m.start_utc, m.match_id, g."order"'''
     )
     ratings = {}
-    for game, player, rating in conn.execute(
-        "SELECT game_id, player_id, rating FROM player_maps"
+    for game, player, *stats in conn.execute(
+        "SELECT game_id, player_id, rating, acs, kast, adr, fk - fd FROM player_maps"
     ):
-        ratings.setdefault(game, {})[player] = rating
+        ratings.setdefault(game, {})[player] = np.array(stats, dtype=float)
     homes, counts, history, features = {}, {}, {}, []
     decay = 0.5 ** (1 / np.array(HALF_LIVES, dtype=float))
     for game, team1, team2, host, international in maps:
@@ -35,10 +36,16 @@ def causal_features(conn, lineups):
         for side, players in enumerate(sides, 1):
             known = [history[p] for p in players if p in history]
             for i, half_life in enumerate(HALF_LIVES):
-                values = [
-                    sums[i] / weights[i] for sums, weights in known if weights[i] > 0
-                ]
-                row[f"form{side}_{half_life}"] = np.mean(values) if values else np.nan
+                for j, stat in enumerate(FORM_STATS):
+                    values = [
+                        sums[i, j] / weights[i, j]
+                        for sums, weights in known
+                        if weights[i, j] > 0
+                    ]
+                    value = np.mean(values) if values else np.nan
+                    row[f"form{side}_{stat}_{half_life}"] = value
+                    if stat == "rating":
+                        row[f"form{side}_{half_life}"] = value
         features.append(row)
         region = macro_region(host)
         if region is not None and not international:
@@ -48,16 +55,27 @@ def causal_features(conn, lineups):
                 if buckets[region] > buckets.get(homes.get(team), 0):
                     homes[team] = region
         for player in set(sides[0]) | set(sides[1]):
-            sums, weights = history.setdefault(player, (np.zeros(3), np.zeros(3)))
-            sums *= decay
-            weights *= decay
-            rating = ratings.get(game, {}).get(player)
-            if rating is not None and np.isfinite(rating):
-                sums += rating
-                weights += 1
-    columns = ["game_id", "home1", "home2"] + [
-        f"form{side}_{h}" for side in (1, 2) for h in HALF_LIVES
-    ]
+            shape = (len(HALF_LIVES), len(FORM_STATS))
+            sums, weights = history.setdefault(
+                player, (np.zeros(shape), np.zeros(shape))
+            )
+            sums *= decay[:, None]
+            weights *= decay[:, None]
+            stats = ratings.get(game, {}).get(player)
+            if stats is not None:
+                valid = np.isfinite(stats)
+                sums[:, valid] += stats[valid]
+                weights[:, valid] += 1
+    columns = (
+        ["game_id", "home1", "home2"]
+        + [f"form{side}_{h}" for side in (1, 2) for h in HALF_LIVES]
+        + [
+            f"form{side}_{stat}_{h}"
+            for side in (1, 2)
+            for stat in FORM_STATS
+            for h in HALF_LIVES
+        ]
+    )
     result = pd.DataFrame(features, columns=columns)
     for column in ("home1", "home2"):
         result[column] = pd.Series([row[column] for row in features], dtype=object)
@@ -203,7 +221,7 @@ class FormLayer(Layer):
 
     def __init__(self, context=None):
         super().__init__(context)
-        self.half_life, self.w, self.rows = 5, 0.0, 0
+        self.half_life, self.w, self.rows = HALF_LIVES[0], 0.0, 0
 
     def _difference(self, frame, half_life):
         features = self.features(frame)
@@ -212,7 +230,7 @@ class FormLayer(Layer):
         ).to_numpy()
 
     def fit(self, frame) -> None:
-        self.half_life, self.w, self.rows = 5, 0.0, 0
+        self.half_life, self.w, self.rows = HALF_LIVES[0], 0.0, 0
         best = np.inf
         offset, y = _logit(frame.p), frame.won.to_numpy(dtype=float)
         for half_life in HALF_LIVES:
@@ -240,6 +258,73 @@ class FormLayer(Layer):
         return f"form: rows={self.rows}, H={self.half_life}, w={self.w:.6g}"
 
 
+class FormMultiLayer(Layer):
+    name = "form_multi"
+
+    def __init__(self, context=None):
+        super().__init__(context)
+        self.half_life = HALF_LIVES[0]
+        self.weights = np.zeros(len(FORM_STATS))
+        self.scales = np.ones(len(FORM_STATS))
+        self.rows = 0
+
+    def _difference(self, frame, half_life):
+        features = self.features(frame)
+        return np.column_stack(
+            [
+                features[f"form1_{stat}_{half_life}"]
+                - features[f"form2_{stat}_{half_life}"]
+                for stat in FORM_STATS
+            ]
+        )
+
+    def fit(self, frame) -> None:
+        self.half_life = HALF_LIVES[0]
+        self.weights = np.zeros(len(FORM_STATS))
+        self.scales = np.ones(len(FORM_STATS))
+        self.rows = 0
+        best = np.inf
+        offset, y = _logit(frame.p), frame.won.to_numpy(dtype=float)
+        for half_life in HALF_LIVES:
+            difference = self._difference(frame, half_life)
+            mask = np.isfinite(difference).all(axis=1)
+            if not mask.any():
+                continue
+            scales = difference[mask].std(axis=0)
+            # Constant features keep a finite scale; no centering or intercept.
+            scales = np.where(scales > 0, scales, 1.0)
+            x = difference[mask] / scales
+            weights = _fit_newton(x, y[mask], offset[mask], np.eye(len(FORM_STATS)))
+            z = offset.copy()
+            z[mask] += x @ weights
+            loss = np.sum(np.logaddexp(0, z) - y * z)
+            if loss < best:
+                best = loss
+                self.half_life = half_life
+                self.weights, self.scales = weights, scales
+                self.rows = int(mask.sum())
+
+    def apply(self, frame) -> pd.Series:
+        difference = self._difference(frame, self.half_life)
+        mask = np.isfinite(difference).all(axis=1)
+        result = frame.p.copy()
+        result.iloc[np.flatnonzero(mask)] = np.clip(
+            _sigmoid(
+                _logit(frame.p)[mask] + difference[mask] / self.scales @ self.weights
+            ),
+            1e-6,
+            1 - 1e-6,
+        )
+        return result
+
+    def describe(self) -> str:
+        weights = ", ".join(
+            f"{stat}={weight:.6g}"
+            for stat, weight in zip(FORM_STATS, self.weights, strict=True)
+        )
+        return f"form_multi: rows={self.rows}, H={self.half_life}, ridge=1, weights: {weights}"
+
+
 class RegionalFormLayer(Layer):
     name = "regional_form"
 
@@ -263,12 +348,22 @@ class RegionalFormLayer(Layer):
         return self.form.apply(adjusted)
 
     def describe(self) -> str:
-        return f"regional_form: {self.regional.describe()}; {self.form.describe()}"
+        return f"{self.name}: {self.regional.describe()}; {self.form.describe()}"
+
+
+class RegionalFormMultiLayer(RegionalFormLayer):
+    name = "regional_form_multi"
+
+    def __init__(self, context=None):
+        super().__init__(context)
+        self.form = FormMultiLayer(self.context)
 
 
 LAYERS = {
     "none": IdentityLayer,
     "regional": RegionalLayer,
     "form": FormLayer,
+    "form_multi": FormMultiLayer,
+    "regional_form_multi": RegionalFormMultiLayer,
     "regional_form": RegionalFormLayer,
 }

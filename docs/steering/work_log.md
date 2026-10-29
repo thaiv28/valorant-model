@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Wider rookie/form grids; multi-stat form layer
+
+Branch `form-grid`, base `main`. Expanded rookie penalty/map grids while fixing K=32 and rd_new=280 for rookie variants; moves-only unchanged. Form half-lives now {2,3,5,8,12}. Added `form_multi` and ordered `regional_form_multi`: causal starter means of rating, ACS, KAST, ADR and fk−fd, stage-1 standard deviations, ridge-1 logistic weights and stage-1 half-life selection. Shared cached history skips null observations per stat. Tests cover grids, recovery, selection, frozen scales, missing/constant data, causality, composition and registration. Checks: `uv run pytest -q` (243 passed, 18.99s; prior recorded 235 in 18.08s), `uv run ruff format --check`, `uv run ruff check`, `git diff --check` passed. Used `UV_OFFLINE=1 UV_NO_SYNC=1` after plain uv hit its local startup panic. Limits: not benchmarked; no network or holdout access.
+
 ## 2026-10-29 — Backtest realism: rounded fees, depth caps, quote robustness, series check
 
 Branch `realism`, base `main`. Added cent-ceiling order fees, $1 contract stakes with fee-inclusive flat ROI, rounded-fee Kelly cash sizing, and tape-volume depth caps (6 hours, 50%; missing tapes unfilled). Returns pair unlimited and capped fills. Added 24/6-hour quote rules, frozen-model quote robustness, and standalone/in-report series calibration, conditional map-2 and decider residual checks. Tests cover fees, depth/orientation, cash caps, quote cutoffs, report assembly without retuning, planted dependence and calibration counts. Baseline: 235 tests in 26.19s. Checks: `uv run pytest -q` (252 passed, 22.38s), `uv run ruff format --check`, `uv run ruff check`, and `git diff --check` passed. Plain offline `uv run` hits the local startup panic; checks use `UV_OFFLINE=1 UV_NO_SYNC=1`. Limits: no network, real-data benchmark or holdout evaluation; tape volume is a fill proxy without queue position/slippage. Changes uncommitted as requested.
