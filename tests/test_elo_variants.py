@@ -156,7 +156,7 @@ def test_region_offsets_only_cross_region_and_zero_sum():
 
 
 def test_registry_grids_and_v1_regression():
-    assert len(MODELS) == len(PARAM_GRIDS) == 21
+    assert len(MODELS) == len(PARAM_GRIDS) == 22
     assert "team_binary" not in MODELS
     for name in MODELS:
         if name == "coin":
@@ -924,3 +924,59 @@ def test_reversion_registry_exact_grid_and_adopted_defaults():
         model = MODELS[name](**options)
         assert model.unit == "player" and model.credit == "round" and model.rd
         assert all(getattr(model, key) == value for key, value in options.items())
+
+
+def tier_sums_match(model):
+    for section, total in model.tier_sum.items():
+        members = [p for p, s in model.tier_of.items() if s == section]
+        assert model.tier_count[section] == len(members)
+        assert total == pytest.approx(sum(model.ratings[p] for p in members))
+
+
+@pytest.mark.parametrize("rd", [False, True])
+def test_tier_reversion_pulls_toward_latest_tier_mean(rd):
+    lineups = {1: ((1,), (2,)), 2: ((3,), (4,)), 3: ((1,), (3,)), 4: ((3,), (5,))}
+    model = EloModel(
+        unit="player", rd=rd, lineups=lineups, season_revert=0.5, revert_target="tier"
+    )
+    model.update(row(game_id=1, start_utc="2025-03-01T00:00:00Z", section="vct"))
+    model.update(row(game_id=2, start_utc="2025-03-02T00:00:00Z", section="gc"))
+    # Offseason maps neither set nor move a player's tier.
+    model.update(row(game_id=4, start_utc="2025-03-03T00:00:00Z", section="offseason"))
+    assert model.tier_of == {1: "vct", 2: "vct", 3: "gc", 4: "gc"}
+    tier_sums_match(model)
+    vct = (model.ratings[1] + model.ratings[2]) / 2
+    gc = (model.ratings[3] + model.ratings[4]) / 2
+    game = row(game_id=3, start_utc="2026-01-05T00:00:00Z", section="vct")
+    r1 = vct + 0.5 * (model.ratings[1] - vct)
+    r3 = gc + 0.5 * (model.ratings[3] - gc)
+    expected = 1 / (1 + 10 ** (-(r1 - r3) / 400))
+    assert model._state(game)[-1] == pytest.approx(expected)
+    model.update(game)
+    # Player 3 moves from GC to VCT; sums follow every rating change and move.
+    assert model.tier_of[3] == "vct" and model.tier_count["gc"] == 1
+    tier_sums_match(model)
+
+
+def test_tier_reversion_prediction_matches_update_expectation():
+    lineups = {1: ((1,), (2,)), 2: ((1,), (2,))}
+    model = EloModel(
+        unit="player", lineups=lineups, season_revert=0.35, revert_target="tier"
+    )
+    model.update(row(game_id=1, start_utc="2025-03-01T00:00:00Z", section="vcl"))
+    game = row(game_id=2, start_utc="2026-02-01T00:00:00Z", section="vcl")
+    vcl = (model.ratings[1] + model.ratings[2]) / 2
+    reverted = vcl + 0.65 * (model.ratings[1] - vcl)
+    expected = model._state(game)[-1]
+    model.update(game)
+    # The update starts from the reverted rating and uses the predicted chance.
+    assert model.ratings[1] == pytest.approx(reverted + model.k * (1 - expected))
+    tier_sums_match(model)
+
+
+def test_init_target_keeps_no_tier_state():
+    model = reversion_model(False, season_revert=0.5)
+    model.update(row(start_utc="2026-01-02T00:00:00Z", section="vct"))
+    assert model.tier_of == {} and model.tier_sum == {}
+    with pytest.raises(ValueError):
+        EloModel(revert_target="league")
