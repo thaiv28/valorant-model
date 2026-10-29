@@ -73,10 +73,72 @@ def kelly_path(bets, initial=50.0):
     return path, drawdown, largest
 
 
-def summarize(frame, n_resamples=2000, seed=0, probability="p"):
-    """Flat ROI with whole-match bootstrap and a separate full-Kelly path."""
+# Prometheus's pregame execution limits (LoL, 2026-10-28): full Kelly, at most
+# 10% of capital per fixture, $250 per order and per fixture, $1k exposure,
+# $2k per UTC day, from a $50 seed; no orders once capital is $0.
+LOL_SIZING = {
+    "kelly_fraction": 1.0,
+    "fixture_fraction": 0.10,
+    "order_cap": 250.0,
+    "fixture_cap": 250.0,
+    "exposure_cap": 1000.0,
+    "day_cap": 2000.0,
+}
+
+
+def capped_path(bets, initial=50.0, sizing=LOL_SIZING):
+    """Kelly with Prometheus-style caps, sized from start-of-day capital.
+
+    Matches on one UTC day overlap, so every bet that day is sized from the
+    capital at the day's start and the day's stakes (open exposure) are capped;
+    all settle at the end of the day. Returns the same tuple as `kelly_path`.
+    """
+    bankroll = float(initial)
+    path = [bankroll]
+    largest = 0.0
+    if not bets.empty:
+        ordered = bets.assign(
+            day=pd.to_datetime(bets["start_utc"], utc=True).dt.strftime("%Y-%m-%d")
+        ).sort_values("start_utc", kind="stable")
+        day_limit = min(sizing["day_cap"], sizing["exposure_cap"])
+        for _, day in ordered.groupby("day", sort=True):
+            capital = bankroll
+            if capital <= 0:
+                path.append(bankroll)
+                continue
+            spent, result = 0.0, 0.0
+            for _, match in day.groupby("match_id", sort=False):
+                stakes = (
+                    capital
+                    * sizing["kelly_fraction"]
+                    * match["fraction"].to_numpy(dtype=float)
+                )
+                stakes = np.minimum(stakes, sizing["order_cap"])
+                fixture_limit = min(
+                    sizing["fixture_fraction"] * capital, sizing["fixture_cap"]
+                )
+                limit = min(fixture_limit, day_limit - spent)
+                total = stakes.sum()
+                if total <= 0 or limit <= 0:
+                    continue
+                if total > limit:
+                    stakes = stakes * (limit / total)
+                spent += float(stakes.sum())
+                largest = max(largest, float(stakes.max()))
+                result += float(np.dot(stakes, match["profit"]))
+            bankroll = max(0.0, bankroll + result)
+            path.append(bankroll)
+    values = np.asarray(path)
+    peaks = np.maximum.accumulate(values)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        drawdown = float(np.nanmax(np.where(peaks > 0, (peaks - values) / peaks, 0)))
+    return path, drawdown, largest
+
+
+def summarize(frame, n_resamples=2000, seed=0, probability="p", sizing="lol"):
+    """Flat ROI with whole-match bootstrap and a Kelly path (`lol` caps or `full`)."""
     bets = select_bets(frame, probability=probability)
-    path, drawdown, largest = kelly_path(bets)
+    path, drawdown, largest = capped_path(bets) if sizing == "lol" else kelly_path(bets)
     low = high = roi = mean_edge = float("nan")
     if not bets.empty:
         profits = bets["profit"].to_numpy()

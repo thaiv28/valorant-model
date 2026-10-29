@@ -4,7 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from promval.backtest import fee, kelly_path, select_bets, summarize
+from promval.backtest import (
+    LOL_SIZING,
+    capped_path,
+    fee,
+    kelly_path,
+    select_bets,
+    summarize,
+)
 
 
 def rows(*updates):
@@ -84,7 +91,7 @@ def test_three_match_path_and_drawdown_in_start_order():
     assert path == pytest.approx(expected)
     assert drawdown == pytest.approx(fraction)
     assert largest == pytest.approx(expected[1] * fraction)
-    result = summarize(frame)
+    result = summarize(frame, sizing="full")
     assert result["bankroll"] == pytest.approx(expected[-1])
     assert result["multiple"] == pytest.approx(expected[-1] / 50)
     assert result["matches"] == 3
@@ -125,3 +132,45 @@ def test_alternative_probability_selects_and_sizes_blended_bets():
     expected = frame.copy()
     expected["p"] = frame.p_blend
     assert summarize(frame, probability="p_blend") == summarize(expected)
+
+
+def _bets(rows):
+    """rows: (match_id, start_utc, fraction, profit)."""
+    return pd.DataFrame(rows, columns=["match_id", "start_utc", "fraction", "profit"])
+
+
+def test_capped_path_fixture_cap_and_start_of_day_capital():
+    # Full Kelly would stake 40%; the fixture cap is 10% of capital.
+    path, _, largest = capped_path(_bets([(1, "2026-03-01T10:00Z", 0.4, 1.0)]))
+    assert largest == pytest.approx(5.0)
+    assert path[-1] == pytest.approx(55.0)
+    # Two matches on one day are both sized from the day's opening capital.
+    path, _, _ = capped_path(
+        _bets(
+            [
+                (1, "2026-03-01T10:00Z", 0.1, 1.0),
+                (2, "2026-03-01T15:00Z", 0.1, -1.0),
+            ]
+        )
+    )
+    assert path == pytest.approx([50.0, 50.0])
+
+
+def test_capped_path_dollar_caps_and_stop_at_zero():
+    big = dict(LOL_SIZING, fixture_fraction=1.0)
+    _, _, largest = capped_path(
+        _bets([(1, "2026-03-01T10:00Z", 1.0, 0.0)]), initial=10_000, sizing=big
+    )
+    assert largest == pytest.approx(250.0)  # order and fixture caps
+    lose_all = dict(LOL_SIZING, fixture_fraction=1.0)
+    path, drawdown, _ = capped_path(
+        _bets(
+            [
+                (1, "2026-03-01T10:00Z", 1.0, -1.0),
+                (2, "2026-03-02T10:00Z", 0.5, 1.0),
+            ]
+        ),
+        sizing=lose_all,
+    )
+    assert path == pytest.approx([50.0, 0.0, 0.0])  # no orders once capital is $0
+    assert drawdown == pytest.approx(1.0)

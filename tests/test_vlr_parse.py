@@ -233,3 +233,9 @@ def test_map_order_follows_tabs_not_sections():
         (2, "Lotus", 12, 14),
         (3, "Breeze", 13, 7),
     ]
+
+
+def test_picked_by_side():
+    """773441: KRUB (team1) picked Summit (map 1), TLV (team2) picked Haven."""
+    match = parse_match(load(FIXTURES / "match_773441.html.gz"), 773441)
+    assert [(m.map, m.picked_by) for m in match.maps] == [("Summit", 1), ("Haven", 2)]

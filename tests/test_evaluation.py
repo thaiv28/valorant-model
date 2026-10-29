@@ -264,7 +264,7 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     assert "## Leaderboard" in report
     assert "Series blended Δ log loss" in report
     assert "Map blended flat ROI" in report
-    assert "Map blended Kelly $" in report
+    assert "Map blended Kelly (LoL caps) $" in report
     assert report.count("#### Log loss vs Kalshi (blended)") == 3
     assert report.count("#### Full-Kelly returns (blended)") == 3
     assert "excluded from blended tables: 2 rows" in report
@@ -404,7 +404,7 @@ def test_glicko_report_default_and_explicit_models(
     assert "no depth limit or slippage" in report
     assert "unplayed maps are not in the rows" in report
     printed = capsys.readouterr().out
-    assert "Series flat ROI" in printed and "Map Kelly $" in printed
+    assert "Series flat ROI" in printed and "Map Kelly (LoL caps) $" in printed
     assert len(printed.splitlines()) <= 20
     selected = benchmark.main(args + ["--report-models", "team_elo,team_elo"])
     assert set(selected) == {"team_elo"}
