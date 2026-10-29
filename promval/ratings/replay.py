@@ -7,7 +7,7 @@ import pandas as pd
 
 def load_maps(conn) -> pd.DataFrame:
     return pd.read_sql(
-        """SELECT g.game_id, m.match_id, m.start_utc, g."order", g.map,
+        """SELECT g.game_id, m.match_id, m.start_utc, g."order", g.map, g.picked_by,
                   m.team1_id, m.team2_id, g.score1, g.score2,
                   e.region, (g.score1 > g.score2) AS won,
                   m.best_of, m.event_id, COALESCE(e.section, 'unknown') AS section,
