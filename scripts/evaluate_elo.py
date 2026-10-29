@@ -20,7 +20,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from promval.backtest import select_bets, summarize
+from promval.backtest import depth_limits, summarize
 from promval.blend import walk_forward
 from promval.evaluation import (
     HOLDOUT_START,
@@ -44,7 +44,8 @@ class QuoteRule:
     `open_delay_minutes` after the market opened, no later than `buffer_hours` before the
     scheduled start (so no veto or lineup news), whose bid/ask spread is at most
     `max_spread`. `prestart`: the last candle ending at or before the start,
-    which can already price the veto.
+    which can already price the veto. `hours24`/`hours6`: last tight candle
+    ending at least 24/6 hours before start and 30 minutes after open.
     """
 
     mode: str = "prestart"
@@ -57,17 +58,23 @@ PRESTART = QuoteRule()
 TRADEABLE = QuoteRule("tradeable")
 
 
-def candle_quote(candles, start_utc, open_time=None, rule=PRESTART):
+def candle_quote(
+    candles, start_utc, open_time=None, rule=PRESTART, with_timestamp=False
+):
     """(bid, ask) closes in dollars under `rule`, or None when no candle qualifies."""
     if isinstance(candles, dict):
         candles = candles.get("candlesticks", [])
     start = pd.Timestamp(start_utc)
-    if rule.mode == "tradeable":
-        if open_time is None:
+    if rule.mode in ("tradeable", "hours24", "hours6"):
+        if open_time is None or pd.isna(open_time):
+            return None
+        opened = pd.Timestamp(open_time)
+        if pd.isna(opened):
             return None
         delay = pd.Timedelta(minutes=rule.open_delay_minutes)
-        earliest = (pd.Timestamp(open_time) + delay).timestamp()
-        cutoff = (start - pd.Timedelta(hours=rule.buffer_hours)).timestamp()
+        earliest = (opened + delay).timestamp()
+        hours = {"hours24": 24, "hours6": 6}.get(rule.mode, rule.buffer_hours)
+        cutoff = (start - pd.Timedelta(hours=hours)).timestamp()
     else:
         earliest, cutoff = float("-inf"), start.timestamp()
     valid = []
@@ -89,7 +96,7 @@ def candle_quote(candles, start_utc, open_time=None, rule=PRESTART):
                 break
             closes.append(value)
         if len(closes) == 2:
-            if rule.mode == "tradeable" and not (
+            if rule.mode != "prestart" and not (
                 0 < closes[0] < closes[1] < 1
                 and closes[1] - closes[0] <= rule.max_spread + 1e-9
             ):
@@ -98,7 +105,8 @@ def candle_quote(candles, start_utc, open_time=None, rule=PRESTART):
     if not valid:
         return None
     pick = min if rule.mode == "tradeable" else max
-    return pick(valid, key=lambda item: item[0])[1]
+    end, quote = pick(valid, key=lambda item: item[0])
+    return (*quote, end) if with_timestamp else quote
 
 
 def candle_mid(candles, start_utc):
@@ -154,11 +162,15 @@ def kalshi_rows(conn, maps, series, directory, rule=PRESTART):
             continue
         with gzip.open(path, "rt") as handle:
             quote = candle_quote(
-                json.load(handle), row.start_utc, market.open_time, rule
+                json.load(handle),
+                row.start_utc,
+                market.open_time,
+                rule,
+                with_timestamp=True,
             )
         if quote is None:
             continue
-        bid, ask = quote
+        bid, ask, quote_ts = quote
         mid = (bid + ask) / 2
         team1 = market.vlr_team_id == row.team1_id
         candidate = row.to_dict()
@@ -168,6 +180,8 @@ def kalshi_rows(conn, maps, series, directory, rule=PRESTART):
             match_id=market.match_id,
             kind=market.kind,
             event_ticker=market.event_ticker,
+            ticker=market.ticker,
+            quote_ts=quote_ts,
             market_p=mid if team1 else 1 - mid,
             team1_side=team1,
             ask=ask if team1 else 1 - bid,
@@ -249,6 +263,16 @@ def market_slices(frame):
             )
 
 
+def depth_cells(rows, probability="p"):
+    stats = summarize(rows, probability=probability, depth=True)
+    roi = (
+        f"{stats['flat_roi']:.2%} [{stats['roi_low']:.2%}, {stats['roi_high']:.2%}]"
+        if stats["bets"]
+        else "—"
+    )
+    return f"{stats['bets']} ({stats['unfilled']} unfilled) | {roi} | ${stats['bankroll']:.2f} |"
+
+
 def market_tables(frame, probability="p"):
     if probability == "p_blend":
         frame = frame[frame.blend_fitted]
@@ -257,8 +281,8 @@ def market_tables(frame, probability="p"):
         "|---|---|---:|---:|---:|---|---|",
     ]
     bet_lines = [
-        "| Kind | Slice | Bets | Matches | Mean edge | Flat ROI [95% interval] | Kelly, LoL caps ($50 start) | Multiple | Max drawdown | Largest stake |",
-        "|---|---|---:|---:|---:|---|---:|---:|---:|---:|",
+        "| Kind | Slice | Bets | Matches | Mean edge | Flat ROI [95% interval] | Kelly, LoL caps ($50 start) | Multiple | Max drawdown | Largest stake | Bets filled | Flat ROI depth-capped [95% interval] | Kelly depth-capped final |",
+        "|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---|---:|",
     ]
     for kind, label, rows in market_slices(frame):
         if rows.empty:
@@ -284,7 +308,8 @@ def market_tables(frame, probability="p"):
         bet_lines.append(
             f"| {kind} | {label} | {stats['bets']} | {stats['matches']} | {edge} | {roi} | "
             f"${stats['bankroll']:.2f} | {stats['multiple']:.3f}× | "
-            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} |"
+            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} | "
+            + depth_cells(rows, probability)
         )
     # Prometheus caps apply per fixture across its series and map markets.
     stats = summarize(frame, probability=probability)
@@ -294,7 +319,8 @@ def market_tables(frame, probability="p"):
             f"{stats['mean_edge']:.4f} | {stats['flat_roi']:.2%} "
             f"[{stats['roi_low']:.2%}, {stats['roi_high']:.2%}] | "
             f"${stats['bankroll']:.2f} | {stats['multiple']:.3f}× | "
-            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} |"
+            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} | "
+            + depth_cells(frame, probability)
         )
     return "\n".join(loss_lines), "\n".join(bet_lines)
 
@@ -304,7 +330,13 @@ def summary_table(markets):
         f"{kind}{suffix} {metric}"
         for suffix in ("", " blended")
         for kind in ("Series", "Map")
-        for metric in ("Δ log loss", "flat ROI", "Kelly (LoL caps) $")
+        for metric in (
+            "Δ log loss",
+            "flat ROI",
+            "Kelly (LoL caps) $",
+            "flat ROI depth-capped",
+            "Kelly depth-capped $",
+        )
     ]
     lines = ["| Model | " + " | ".join(labels) + " |", "|---|" + "---:|" * len(labels)]
     for name, frame in markets.items():
@@ -314,7 +346,7 @@ def summary_table(markets):
                 rows = frame[frame.kind == kind] if not frame.empty else frame
                 if probability == "p_blend":
                     rows = rows[rows.blend_fitted]
-                stats = summarize(rows, probability=probability)
+                stats = summarize(rows, probability=probability, n_resamples=0)
                 diff = (
                     (
                         game_losses(rows[probability], rows.won).log_loss.mean()
@@ -323,14 +355,56 @@ def summary_table(markets):
                     if not rows.empty
                     else None
                 )
+                depth = summarize(
+                    rows, probability=probability, depth=True, n_resamples=0
+                )
                 cells.extend(
                     [
                         f"{diff:.6f}" if diff is not None else "—",
                         f"{stats['flat_roi']:.2%}" if stats["bets"] else "—",
                         f"${stats['bankroll']:.2f}",
+                        f"{depth['flat_roi']:.2%}" if depth["bets"] else "—",
+                        f"${depth['bankroll']:.2f}",
                     ]
                 )
         lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def robustness_table(markets):
+    lines = [
+        "| Quote rule | Model | Kind | Rows | Raw Δ log loss | Blended Δ log loss | Raw flat ROI depth-capped | Blended flat ROI depth-capped |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for (rule, name), frame in markets.items():
+        for kind in ("series", "map"):
+            rows = frame[frame.kind == kind] if not frame.empty else frame
+            cells = []
+            rois = []
+            for probability in ("p", "p_blend"):
+                part = (
+                    rows
+                    if probability == "p" or rows.empty
+                    else rows[rows.blend_fitted]
+                )
+                if part.empty:
+                    cells.append("—")
+                    rois.append("—")
+                else:
+                    delta = (
+                        game_losses(part[probability], part.won).log_loss.mean()
+                        - game_losses(part.market_p, part.won).log_loss.mean()
+                    )
+                    cells.append(f"{delta:.6f}")
+                    stats = summarize(
+                        part, probability=probability, depth=True, n_resamples=0
+                    )
+                    rois.append(f"{stats['flat_roi']:.2%}" if stats["bets"] else "—")
+            lines.append(
+                f"| {rule} | {name} | {kind} | {len(rows)} | "
+                + " | ".join(cells + rois)
+                + " |"
+            )
     return "\n".join(lines)
 
 
@@ -346,8 +420,8 @@ def scored_rows(frame, start, end=HOLDOUT_START):
 def monthly_table(frame):
     """All metrics share linked rows; unfitted blend months show dashes."""
     lines = [
-        "| Kind | Month | Rows | Model log loss | Blended log loss | Kalshi log loss | Raw flat ROI (bets) | Blended flat ROI (bets) |",
-        "|---|---|---:|---:|---:|---:|---|---|",
+        "| Kind | Month | Rows | Model log loss | Blended log loss | Kalshi log loss | Raw flat ROI (bets), unlimited Kelly final | Blended flat ROI (bets), unlimited Kelly final | Raw bets filled | Raw Flat ROI depth-capped [95% interval] | Raw Kelly depth-capped final | Blended bets filled | Blended Flat ROI depth-capped [95% interval] | Blended Kelly depth-capped final |",
+        "|---|---|---:|---:|---:|---:|---|---|---:|---|---:|---:|---|---:|",
     ]
     if frame.empty:
         return "\n".join(lines)
@@ -356,8 +430,12 @@ def monthly_table(frame):
     )
 
     def roi(rows, probability):
-        bets = select_bets(rows, probability=probability)
-        return f"{bets.profit.mean():.2%} ({len(bets)})" if len(bets) else "— (0)"
+        stats = summarize(rows, probability=probability, n_resamples=0)
+        return (
+            f"{stats['flat_roi']:.2%} ({stats['bets']}), ${stats['bankroll']:.2f}"
+            if stats["bets"]
+            else "— (0), $50.00"
+        )
 
     for (kind, month), rows in monthly.groupby(["kind", "month"], sort=True):
         fitted = rows.blend_fitted.all()
@@ -370,7 +448,10 @@ def monthly_table(frame):
         )
         lines.append(
             f"| {kind} | {month} | {len(rows)} | {mean_loss(rows):.6f} | {blend_loss} | "
-            f"{game_losses(rows.market_p, rows.won).log_loss.mean():.6f} | {raw_roi} | {blend_roi} |"
+            f"{game_losses(rows.market_p, rows.won).log_loss.mean():.6f} | {raw_roi} | {blend_roi} | "
+            + depth_cells(rows)
+            + " "
+            + (depth_cells(rows, "p_blend") if fitted else "— | — | — |")
         )
     return "\n".join(lines)
 
@@ -420,12 +501,17 @@ def main(argv=None):
     parser.add_argument("--blend-min", type=int, default=100)
     parser.add_argument(
         "--quote",
-        choices=("tradeable", "prestart"),
+        choices=("tradeable", "prestart", "hours24", "hours6"),
         default="tradeable",
         help="Kalshi price: first tight quote ≥30 min after listing and ≥2 h "
-        "before start (default), or the last candle before start",
+        "before start (default); hours24/hours6 use the last tight quote by that "
+        "cutoff; prestart uses the last candle before start",
     )
     parser.add_argument("--max-spread", type=float, default=0.06)
+    parser.add_argument("--depth-window-hours", type=float, default=6)
+    parser.add_argument("--depth-share", type=float, default=0.5)
+    parser.add_argument("--robustness", action="store_true")
+    parser.add_argument("--series-check", action="store_true")
     parser.add_argument("--holdout", action="store_true")
     parser.add_argument("--write-weights", action="store_true")
     args = parser.parse_args(argv)
@@ -448,6 +534,10 @@ def main(argv=None):
             or (args.seed_from is not None and args.seed_from > args.tune_from)
             or args.jobs < 1
             or args.blend_min < 1
+            or not math.isfinite(args.depth_window_hours)
+            or args.depth_window_hours < 0
+            or not 0 <= args.depth_share <= 1
+            or not 0 <= args.max_spread <= 1
         ):
             raise ValueError
     except (ValueError, TypeError):
@@ -574,19 +664,25 @@ def main(argv=None):
                 f"with a spread ≤ {args.max_spread:.2f}: a price a bot could trade before any veto. "
                 "Markets without such a quote are skipped. "
                 if args.quote == "tradeable"
+                else f"Kalshi uses the last tight hourly quote ending ≥{24 if args.quote == 'hours24' else 6} h "
+                "before start and ≥30 min after open. "
+                if args.quote in ("hours24", "hours6")
                 else "Kalshi uses the last valid hourly bid/ask midpoint ending at or before "
                 "match start (can already price the veto). "
             )
             + "oriented to team1 using aliases. One contract per event, preferring team1. "
             "Compare identical rows; map predictions use the first map's pre-match chance. "
-            "Missing links, aliases or candles are skipped. Backtests use frozen stage-1 parameters on validation rows. Layers fit only tuning rows. Fills are assumed at the hourly candle’s ask/bid with "
-            "no depth limit or slippage; unplayed maps are not in the rows. "
-            "Kalshi taker fees use unrounded f(c)=0.07×c×(1−c) per contract. Buy the larger positive "
-            "after-fee edge, otherwise skip; require a two-sided quote with both buy costs in (0,1). "
-            "Full Kelly uses fraction (q−c′)/(1−c′), c′=c+f(c). All bets in a match use its starting "
-            "bankroll, scaling fractions to sum to at most one, then settle together. Each kind/slice "
-            "runs its own $50 path. Drawdown uses settled match balances. Flat stakes are $1 all-in "
-            "per bet; ROI intervals resample whole matches 2,000 times, seed 0.",
+            "Missing links, aliases or candles are skipped; unplayed maps are not in the rows. "
+            "Returns use frozen stage-1 parameters. "
+            "Each bet buys $1 of contracts, fees extra; order fees ceil to a cent "
+            "(0.07 × contracts × price × (1−price)). Edge selection uses unrounded per-contract fees. "
+            "ROI divides profit by stake plus fees; intervals resample matches 2,000 times. "
+            "Unlimited depth and depth-capped returns are shown together. "
+            f"Depth uses {args.depth_share:g} of acceptable-price tape volume in the "
+            f"{args.depth_window_hours:g} hours after the quote, missing tapes give zero fills. "
+            "Partial Kelly fills are allowed; flat bets require the full $1 stake. "
+            "Kelly uses LoL caps and rounded-fee affordability, from a $50 seed. "
+            "Each slice runs independently. Tape volume is a fill proxy; no slippage is modeled.",
         ]
         blended_markets, monthly_fits = {}, {}
         for name in detailed:
@@ -595,9 +691,49 @@ def main(argv=None):
             market = kalshi_rows(
                 conn, source, series_rows(source), data_dir(), quote_rule
             )
+            if not market.empty:
+                market = depth_limits(
+                    market, data_dir(), args.depth_window_hours, args.depth_share
+                )
             blended_markets[name], monthly_fits[name] = walk_forward(
                 market, args.validate_from, args.blend_min
             )
+        if args.robustness:
+            robust = {}
+            for mode in ("tradeable", "hours24", "hours6"):
+                for name in detailed:
+                    source = scored_rows(winners[name], args.validate_from, None)
+                    market = kalshi_rows(
+                        conn,
+                        source,
+                        series_rows(source),
+                        data_dir(),
+                        QuoteRule(mode, max_spread=args.max_spread),
+                    )
+                    if not market.empty:
+                        market = depth_limits(
+                            market,
+                            data_dir(),
+                            args.depth_window_hours,
+                            args.depth_share,
+                        )
+                    market, _ = walk_forward(market, args.validate_from, args.blend_min)
+                    robust[mode, name] = (
+                        scored_rows(market, args.validate_from)
+                        if not market.empty
+                        else market
+                    )
+            report.extend(["## Quote-time robustness", robustness_table(robust)])
+        if args.series_check:
+            from scripts.series_independence import series_check
+
+            for name in detailed:
+                report.extend(
+                    [
+                        f"## Series independence: {name}",
+                        series_check(winners[name], args.validate_from)["markdown"],
+                    ]
+                )
         windows = [
             ("Stage 1 — tuning (outcomes)", args.tune_from, args.tune_to),
             ("Stage 2 — validation (outcomes)", args.validate_from, HOLDOUT_START),

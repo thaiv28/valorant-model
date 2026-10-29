@@ -214,6 +214,8 @@ def test_load_series_and_market_pairing(database):
         )
         market = benchmark.kalshi_rows(conn, maps, series, data / "kalshi")
         assert len(market) == 2
+        assert set(market.ticker) == {"Sa", "Ma"}
+        assert set(market.quote_ts) == {1672531200}
         assert market.market_p.tolist() == pytest.approx([0.7, 0.7])
         assert market.ask.tolist() == pytest.approx([0.71, 0.71])
         assert market.bid.tolist() == pytest.approx([0.69, 0.69])
@@ -413,7 +415,7 @@ def test_glicko_report_default_and_explicit_models(
     assert report.count("#### Full-Kelly returns\n") == 4
     assert "| series | vct |" in report and "| map | international=0 |" in report
     assert "frozen stage-1" in report and "unrounded" in report
-    assert "no depth limit or slippage" in report
+    assert "depth-capped returns" in report
     assert "unplayed maps are not in the rows" in report
     printed = capsys.readouterr().out
     assert "Series flat ROI" in printed and "Map Kelly (LoL caps) $" in printed
@@ -501,7 +503,9 @@ def test_blend_walk_forward_boundaries_kinds_and_exclusion():
     )
     summary = benchmark.summary_table({"test": january})
     assert "Series blended Δ log loss" in summary
-    assert summary.splitlines()[-1].endswith("— | — | $50.00 | — | — | $50.00 |")
+    assert summary.splitlines()[-1].endswith(
+        "— | — | $50.00 | — | $50.00 | — | — | $50.00 | — | $50.00 |"
+    )
     with pytest.raises(ValueError):
         walk_forward(frame, min_rows=0)
 
@@ -753,3 +757,212 @@ def test_blend_default_validation_start():
     rows, fits = walk_forward(frame, min_rows=1)
     assert fits.n.tolist() == [0, 0, 1, 2, 2]
     assert rows.blend_fitted.tolist() == [False, False, True, True, True]
+
+
+@pytest.mark.parametrize("mode,hours", [("hours24", 24), ("hours6", 6)])
+def test_fixed_hours_quote_latest_eligible(mode, hours):
+    start = pd.Timestamp("2026-01-03T00:00:00Z")
+    cutoff = int((start - pd.Timedelta(hours=hours)).timestamp())
+    candles = [
+        _candle(cutoff - 3600, 0.4, 0.45),
+        _candle(cutoff, 0.5, 0.55),
+        _candle(cutoff + 1, 0.6, 0.65),
+    ]
+    opened = (start - pd.Timedelta(days=2)).isoformat()
+    rule = benchmark.QuoteRule(mode)
+    assert benchmark.candle_quote(candles, start, opened, rule) == (0.5, 0.55)
+    for missing in (None, float("nan"), pd.NaT, ""):
+        assert benchmark.candle_quote(candles, start, missing, rule) is None
+    assert (
+        benchmark.candle_quote(
+            candles, start, pd.Timestamp(cutoff, unit="s", tz="UTC"), rule
+        )
+        is None
+    )
+    assert (
+        benchmark.candle_quote([_candle(cutoff, 0.3, 0.8)], start, opened, rule) is None
+    )
+
+
+def test_robustness_table_rows():
+    frames = {
+        (mode, "model"): pd.DataFrame() for mode in ("tradeable", "hours24", "hours6")
+    }
+    table = benchmark.robustness_table(frames)
+    assert len(table.splitlines()) == 8
+    for mode in ("tradeable", "hours24", "hours6"):
+        assert f"| {mode} | model | series | 0 |" in table
+        assert f"| {mode} | model | map | 0 |" in table
+
+
+def test_series_check_planted_dependence():
+    from scripts.series_independence import series_check
+
+    records = []
+    for match in range(120):
+        first_won = match % 2
+        wins = [first_won, first_won, 1 - first_won]
+        for order, won in enumerate(wins, 1):
+            records.append(
+                {
+                    "match_id": match,
+                    "order": order,
+                    "start_utc": "2026-01-01T00:00:00Z",
+                    "best_of": 3 if match < 100 else 5,
+                    "p": 0.5,
+                    "won": won,
+                    "series_won": first_won,
+                }
+            )
+    result = series_check(pd.DataFrame(records), n_resamples=300)
+    assert result["rows"] == result["bins"].rows.sum() == 120
+    assert result["dependence"][1]["mean"] == 0.5
+    assert result["dependence"][0]["mean"] == -0.5
+    assert result["contrast_interval"][0] > 0
+    assert len(result["summary"].splitlines()) <= 15
+    assert np.isfinite(result["log_loss"][3])
+
+
+def test_robustness_and_series_report_reuse_frozen_models(
+    database, tmp_path, monkeypatch
+):
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    calls = []
+    original = benchmark.tune_candidate
+
+    def counted(task):
+        calls.append(task)
+        return original(task)
+
+    monkeypatch.setattr(benchmark, "tune_candidate", counted)
+    out = tmp_path / "robust.md"
+    args = [
+        "--db",
+        str(path),
+        "--out",
+        str(out),
+        "--models",
+        "team_elo",
+        "--report-models",
+        "team_elo",
+        "--layers",
+        "none",
+        "--jobs",
+        "1",
+        "--k-grid",
+        "16",
+        "--tune-from",
+        "2022-01-01",
+        "--tune-to",
+        "2023-01-01",
+        "--validate-from",
+        "2023-01-01",
+        "--quote",
+        "prestart",
+        "--robustness",
+        "--series-check",
+    ]
+    benchmark.main(args)
+    assert len(calls) == 1  # Each quote rule uses the already selected replay.
+    report = out.read_text()
+    table = report.split("## Quote-time robustness")[1].split("## Series independence")[
+        0
+    ]
+    assert (
+        len([line for line in table.splitlines() if line.startswith("| tradeable")])
+        == 4
+    )
+    for mode in ("tradeable", "hours24", "hours6"):
+        assert f"| {mode} | team_elo | map |" in table
+        assert f"| {mode} | team_elo+none | series |" in table
+    assert "## Series independence: team_elo" in report
+    assert "Bets filled" in report and "unfilled" in report
+    assert "Flat ROI depth-capped [95% interval]" in report
+
+
+def test_series_decider_window_first_map_probability_and_empty():
+    from scripts.series_independence import series_check
+
+    frame = pd.DataFrame(
+        [
+            {
+                "match_id": match,
+                "order": order,
+                "p": p,
+                "won": won,
+                "best_of": 3,
+                "series_won": 1,
+                "start_utc": start,
+            }
+            for match, start in [
+                (1, "2025-09-01T00:00:00Z"),
+                (2, "2026-07-01T00:00:00Z"),
+            ]
+            for order, p, won in [(1, 0.2, 1), (2, 0.9, 0), (3, 0.7, 1)]
+        ]
+    )
+    result = series_check(frame.sample(frac=1, random_state=0), n_resamples=20)
+    assert result["rows"] == 1
+    assert result["bins"].rows.sum() == 1
+    assert result["bins"].query("rows == 1").predicted.iloc[0] == pytest.approx(
+        series_probability(0.2, 3)
+    )
+    assert result["dependence"][1]["mean"] == pytest.approx(-0.9)
+    assert result["decider"]["mean"] == pytest.approx(0.3)
+    empty = series_check(frame.iloc[:0], n_resamples=20)
+    assert empty["rows"] == empty["bins"].rows.sum() == 0
+    assert empty["decider"]["rows"] == 0
+
+
+def test_series_standalone_cli(database, tmp_path):
+    path, _ = database
+    out = tmp_path / "series.md"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/series_independence.py"),
+            "--db",
+            str(path),
+            "--from",
+            "2023-01-01",
+            "--to",
+            "2024-01-01",
+            "--params",
+            '{"k": 16}',
+            "--out",
+            str(out),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert len(result.stdout.splitlines()) <= 15
+    assert "Series independence" in result.stdout
+    assert "Probability bin" in out.read_text()
+
+
+def test_robustness_table_populated_metrics():
+    frame = pd.DataFrame(
+        [
+            {
+                "kind": "series",
+                "match_id": 1,
+                "start_utc": "2026-01-01T00:00:00Z",
+                "p": 0.8,
+                "p_blend": 0.7,
+                "blend_fitted": True,
+                "won": 1,
+                "market_p": 0.6,
+                "ask": 0.5,
+                "bid": 0.4,
+                "depth1": 2,
+                "depth2": 0,
+            }
+        ]
+    )
+    table = benchmark.robustness_table({("hours6", "model"): frame})
+    cells = table.splitlines()[2].split("|")[1:-1]
+    assert float(cells[4]) == pytest.approx(-np.log(0.8) + np.log(0.6), abs=1e-6)
+    assert float(cells[5]) == pytest.approx(-np.log(0.7) + np.log(0.6), abs=1e-6)
+    assert cells[6].strip() == cells[7].strip() == "92.31%"
