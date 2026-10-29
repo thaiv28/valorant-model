@@ -11,7 +11,7 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 | `promval/main.py` | CLI entry; mounts the `kalshi` and `vlr` command groups |
 | `promval/kalshi/api.py` | Public HTTP client, pacing, retries and pagination |
 | `promval/kalshi/collect.py` | Raw catalog, trade, candle and book files |
-| `promval/kalshi/cli.py` | Collector and book-loop commands |
+| `promval/kalshi/cli.py` | Collector, manifest and book-loop commands |
 | `tests/test_kalshi_collect.py` | Offline fixture-based collector and CLI tests |
 | `promval/vlr/` | VLR.gg crawler, raw cache and parsers |
 | `scripts/001_create_tables.sql`, `002_load_vlr.py`, `setup_db.sh` | Rebuild SQLite from VLR cache |
@@ -22,7 +22,7 @@ Python ≥ 3.12 with uv; SQLite rebuilt from raw caches; raw SQL; Typer CLI (`pr
 
 ## Kalshi collector
 
-`promval kalshi collect [--no-books] [--limit N]` refreshes both Valorant series (`KXVALORANTGAME`, `KXVALORANTMAP`), saves final-market histories and snapshots active books. `--limit` caps new trade/candle fetches combined (each file attempt counts separately). `promval kalshi books --every 60 --minutes 60` refreshes active tickers each pass; pass summaries include failures. No schedule installed.
+`promval kalshi collect [--no-books] [--limit N]` refreshes both Valorant series (`KXVALORANTGAME`, `KXVALORANTMAP`), saves final-market histories and snapshots active books. `--limit` caps new trade/candle fetches combined (each file attempt counts separately). `promval kalshi books --every 60 --minutes 60` refreshes active tickers each pass; pass summaries include failures. GitHub Actions collects every six hours (see Deployment).
 
 Public base: `https://api.elections.kalshi.com/trade-api/v2`. Paginate `/markets` and `/historical/markets` by series; merge by ticker, preferring `/markets`. Historical-catalog markets use `/historical/trades?ticker=T` and `/historical/markets/T/candlesticks`; recent markets use `/markets/trades?ticker=T` and `/series/S/markets/T/candlesticks`. Trades paginate with `limit=1000`; hourly candles use market open/close unix timestamps and `period_interval=60`. Preserve raw fields. Books use `/markets/T/orderbook`; the books loop discovers tickers through `/markets?series_ticker=S&status=open`.
 
@@ -31,9 +31,10 @@ Under `data/kalshi/` (or `$PROMVAL_DATA/kalshi/`):
 - `markets/<SERIES>.json`: raw market list sorted by ticker, refreshed each run.
 - `trades/<TICKER>.jsonl.gz`: raw full tape sorted by (`created_time`, `trade_id`).
 - `candles/<TICKER>.json.gz`: raw candlesticks list.
-- `books/<TICKER>.jsonl`: append-only lines with `at` (UTC ISO Z, second precision) and raw `orderbook_fp`.
+- `books/<YYYY-MM-DD>/<YYYYMMDDTHHMMSSZ>.jsonl.gz`: one new gzip file per pass, one line per snapshot with `at` (UTC ISO Z, second precision), `ticker` and raw `orderbook_fp`. No appends; zero snapshots write no file. Local timestamp collisions advance the filename by a second.
+- `manifest.json`: version 1 with sorted `trades` and `candles` ticker arrays. Skip histories present locally or listed here; runners download only this manifest, never the history archive.
 
-New files and refreshed catalogs use temporary files plus atomic rename. Only finalized/settled markets get histories; existing trade/candle files are never rewritten. Empty tapes with positive `volume_fp` (or `volume`) and empty candle lists report errors without writing files, allowing retries. Zero-volume empty tapes are saved as complete. Other markets continue after failures; failed catalogs skip that series. Initial book creation is atomic; later snapshots append.
+New files and refreshed catalogs use temporary files plus atomic rename. Only finalized/settled markets get histories; existing trade/candle files are never rewritten. Empty tapes with positive `volume_fp` (or `volume`) and empty candle lists report errors without writing files, allowing retries. Zero-volume empty tapes are saved as complete. Other markets continue after failures; failed catalogs skip that series. After collection, atomically rewrite the manifest as the union of its old entries and all local histories, including newly saved files. A missing manifest starts empty. `promval kalshi manifest` rebuilds it from local history files only, for seeding S3. Books are written atomically once per pass.
 
 The standard-library client uses a repository User-Agent, 30-second timeout and at least 0.06 seconds between requests. HTTP 429/5xx, URL errors and timeouts retry up to five attempts with 1/2/4/8-second backoff. First-run estimate: about 10k final markets × two requests at ~0.06-second spacing plus latency, roughly an hour; pagination and retries can add time.
 

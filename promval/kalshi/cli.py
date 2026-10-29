@@ -6,7 +6,7 @@ import typer
 
 from promval.kalshi.api import Client
 from promval.kalshi.collect import collect as collect_markets
-from promval.kalshi.collect import snapshot_books
+from promval.kalshi.collect import rebuild_manifest, snapshot_books
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -46,7 +46,7 @@ def books(
     ),
     minutes: float = typer.Option(60, min=0, help="Run duration in minutes."),
 ):
-    """Refresh open tickers and append snapshots on each pass."""
+    """Refresh open tickers and save one snapshot file per pass."""
     if every <= 0:
         raise typer.BadParameter("must be positive", param_hint="--every")
     client = Client()
@@ -61,3 +61,10 @@ def books(
                 time.sleep(delay)
     except KeyboardInterrupt:
         return
+
+
+@app.command()
+def manifest():
+    """Rebuild the history manifest from local trade and candle files."""
+    saved = rebuild_manifest()
+    typer.echo(f"trades={len(saved['trades'])} candles={len(saved['candles'])}")

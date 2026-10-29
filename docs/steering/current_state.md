@@ -4,7 +4,7 @@
 
 2026-10-28: Kalshi collector and VLR crawler, parsers and DB build are in place. No model yet.
 
-- Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (run manually; not scheduled). The first full backfill was started 2026-10-28.
+- Kalshi: catalogs, final trade tapes, hourly candles and open-book snapshots save to `data/kalshi/` (scheduled every 6 h once secrets/variable are set and S3 is seeded). The first full backfill was started 2026-10-28.
 - VLR: raw cache, parsers and `scripts/setup_db.sh`; a live sample of 27 matches (2021–2026) parsed with no errors. The full backfill has not run.
 
 ## Known limits
@@ -15,7 +15,6 @@
 
 ## Future work
 
-- Schedule the Kalshi collector (storage needs a decision: S3 via the infrastructure repo, or local).
 - Run the VLR backfill (`promval vlr crawl --since 2021-01-01 --full`); add event tiers and team aliases.
 - bo3.gg cross-check; Liquipedia rosters and map pool.
 - Elo v1 and the benchmark harness (design plan Phase 2).
