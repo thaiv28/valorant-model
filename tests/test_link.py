@@ -103,11 +103,13 @@ def test_three_passes():
     assert {r.event_ticker: r.method for r in result.links} == {
         "series": "exact",
         "renamed": "alias",
-        "fuzzy": "fuzzy",
+        "fuzzy": "anchor",
     }
     assert {a.competitor_id: (a.vlr_team_id, a.events) for a in result.aliases} == {
-        "kr": (10, 1),
-        "mibr": (20, 1),
+        "kr": (10, 2),
+        "mibr": (20, 2),
+        "unknown": (10, 1),
+        "unknown2": (20, 1),
     }
     assert cross_check([renamed, fuzzy, exact], result.links, [match()]).agreements == 6
 
@@ -236,7 +238,7 @@ def test_fixture_db_build(builder, capsys):
     seeds = [
         ("KRÜ BLAZE", "Team Liquid Brazil", "2026-10-28T21:00:00Z"),
         ("MIBR GC", "SK Nebula", "2026-10-28T18:00:00Z"),
-        ("T1", "DRX", "2026-08-28T11:00:00Z"),
+        ("T1", "KIWOOM DRX", "2026-08-28T11:00:00Z"),
         ("Global Esports", "VARREL", "2026-08-27T11:00:00Z"),
         ("KRÜ BLAZE", "MIBR GC", "2026-10-30T21:00:00Z"),
     ]
@@ -282,6 +284,10 @@ def test_fixture_db_build(builder, capsys):
     assert "mismatches=2" in capsys.readouterr().out
     report = (root / "db" / "link_report.txt").read_text()
     assert "unplayed" in report and games[0]["ticker"] in report
+    assert "DRX → KIWOOM DRX" in report
+    assert "scheduled=2026-10-30T21:00:00Z" in report
+    assert "event=VCT Game Changers Championship 2026" in report
+    assert "KRÜ Blaze" in report or "KRÜ BLAZE" in report
     with sqlite3.connect(root / "db" / "valorant.db") as conn:
         conn.execute(
             "UPDATE matches SET start_utc='2020-01-01T00:00:00Z' WHERE match_id=1"
@@ -314,3 +320,126 @@ def test_old_ticker_does_not_supply_date():
     )
     assert row["scheduled_utc"] is None
     assert row["team_code"] == "DRX"
+
+
+@pytest.mark.parametrize(
+    ("kalshi", "vlr", "code", "method"),
+    [
+        ("DRX", "KIWOOM DRX", "DRX", "anchor"),
+        (
+            "Bilibili Gaming",
+            "Guangzhou Huadu Bilibili Gaming (Bilibili Gaming)",
+            "BLG",
+            "exact",
+        ),
+        (
+            "Guangzhou Huadu Bilibili Gaming",
+            "Guangzhou Huadu Bilibili Gaming (Bilibili Gaming)",
+            "BLG",
+            "exact",
+        ),
+        ("XLG Gaming", "Xi Lai Gaming", "XLG", "anchor"),
+        ("eSports Cologne", "CGN Esports", "CGN", "anchor"),
+        ("SGE Vision", "Eintracht Frankfurt Team Vision", "SGE", "anchor"),
+        ("SGE Vision", "Eintracht Frankfurt", "SGE", None),
+        ("Valorando", "VALORANDO", "VAL", "exact"),
+    ],
+)
+def test_real_name_variants(kalshi, vlr, code, method):
+    target = event(names=(kalshi, "Opponent"))
+    target.markets[0]["team_code"] = code
+    result = link([target], [match(names=(vlr, "Opponent"))])
+    assert result.links[0].method == method
+    if method is None:
+        assert result.links[0].reason == "anchor: other team implausible"
+
+
+def test_fuzzy_last_without_confirmed_side():
+    target = event(names=("Kru Blaz", "MIBR G"), ids=("x", "y"))
+    result = link([target], [match()])
+    assert result.links[0].method == "fuzzy"
+    assert not result.aliases
+
+
+@pytest.mark.parametrize("name", ["RIZON", "ALTERNATE aTTaX"])
+def test_exact_team_preferred_over_subteam(name):
+    target = event(names=(name, "Opponent"))
+    matches = [
+        match(
+            1,
+            names=(name + " Cherry" if name == "RIZON" else name + " Ruby", "Opponent"),
+            ids=(30, 20),
+        ),
+        match(2, names=(name, "Opponent")),
+    ]
+    assert link([target], matches).links[0].match_id == 2
+    # The exact team exists in the window, but plays somebody else.
+    matches[1]["team2_name"] = "Different"
+    matches[1]["team2_id"] = 40
+    assert link([target], matches).links[0].match_id is None
+
+
+def test_anchor_requires_unique_confirmed_team_and_plausible_other():
+    target = event(names=("DRX", "Opponent"))
+    candidates = [
+        match(names=("KIWOOM DRX", "Opponent")),
+        match(2, names=("DRX Academy", "Opponent"), ids=(30, 20)),
+    ]
+    assert link([target], candidates).links[0].match_id is None
+    rejected = link([target], [match(names=("Unrelated", "Opponent"))]).links[0]
+    assert rejected.match_id is None
+    assert rejected.reason == "anchor: other team implausible"
+
+
+def test_alias_learned_from_anchor_enables_later_round():
+    later = "2026-11-10T21:00:00Z"
+    renamed = event("first", names=("New Brand", "Other Brand"), scheduled=later)
+    anchored = event("second", names=("DRX", "Opponent"))
+    result = link(
+        [renamed, anchored],
+        [
+            match(names=("KIWOOM DRX", "Opponent")),
+            match(2, names=("KIWOOM DRX", "Opponent"), start=later),
+        ],
+    )
+    assert [(r.match_id, r.method) for r in result.links] == [
+        (2, "alias"),
+        (1, "anchor"),
+    ]
+    assert {a.events for a in result.aliases} == {2}
+
+
+def test_anchor_conflict_drops_alias_permanently():
+    later = "2026-11-10T21:00:00Z"
+    last = "2026-11-20T21:00:00Z"
+    events = [
+        event("first", names=("DRX", "Opponent")),
+        event("second", names=("DRX", "Opponent"), scheduled=later),
+        event("third", names=("New Brand", "Other Brand"), scheduled=last),
+    ]
+    result = link(
+        events,
+        [
+            match(names=("KIWOOM DRX", "Opponent")),
+            match(2, names=("KIWOOM DRX", "Opponent"), ids=(99, 20), start=later),
+            match(3, names=("KIWOOM DRX", "Opponent"), start=last),
+        ],
+    )
+    assert [r.method for r in result.links] == ["anchor", "anchor", None]
+    assert [a.competitor_id for a in result.aliases] == ["mibr"]
+
+
+def test_sge_short_name_via_learned_alias():
+    later = "2026-11-10T21:00:00Z"
+    events = [
+        event("short", names=("SGE Vision", "Opponent"), scheduled=later),
+        event("long", names=("SGE Vision", "Opponent")),
+    ]
+    result = link(
+        events,
+        [
+            match(names=("Eintracht Frankfurt Team Vision", "Opponent")),
+            match(2, names=("Eintracht Frankfurt", "Opponent"), start=later),
+        ],
+    )
+    assert [r.method for r in result.links] == ["alias", "anchor"]

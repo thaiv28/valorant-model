@@ -136,6 +136,84 @@ def _time(value):
         return None
 
 
+def _variants(name):
+    """Keep the full outside name and an optional trailing alternate name."""
+    found = re.fullmatch(r"(.*?)\s*\(([^()]*)\)\s*", name)
+    return (found[1].strip(), found[2].strip()) if found else (name,)
+
+
+def _exact(kalshi, vlr):
+    tokens = normalize(kalshi)
+    return bool(tokens) and any(tokens == normalize(v) for v in _variants(vlr))
+
+
+def _confirmed(market, match, side, aliases):
+    return _exact(market["team_name"], match[f"team{side}_name"]) or (
+        aliases.get(market.get("competitor_id")) == match[f"team{side}_id"]
+    )
+
+
+def _plausible(market, name, candidates):
+    # A known exact team in the window prevents silently choosing its subteam.
+    if not _exact(market["team_name"], name) and any(
+        _exact(market["team_name"], m[f"team{s}_name"])
+        for m in candidates
+        for s in (1, 2)
+    ):
+        return False
+    tokens = set(normalize(market["team_name"]))
+    code = "".join(normalize(market.get("team_code") or ""))
+    for variant in _variants(name):
+        other = normalize(variant)
+        if not tokens or not other:
+            continue
+        if tokens.intersection(other) or (
+            code
+            and (
+                code in other
+                or code == "".join(t[0] for t in other)
+                or code
+                == "".join(t[0] for t in re.findall(r"[^\W_]+", variant.casefold()))
+            )
+        ):
+            return True
+        if (
+            SequenceMatcher(
+                None, " ".join(sorted(tokens)), " ".join(sorted(set(other)))
+            ).ratio()
+            >= 0.6
+        ):
+            return True
+    return False
+
+
+def _anchors(event, candidates, aliases):
+    found, implausible = [], False
+    for match in candidates:
+        orientations = set()
+        for sides in permutations((1, 2)):
+            for anchor in (0, 1):
+                market, side = event.markets[anchor], sides[anchor]
+                if not _confirmed(market, match, side, aliases):
+                    continue
+                team_id = match[f"team{side}_id"]
+                containing = [
+                    m for m in candidates if team_id in (m["team1_id"], m["team2_id"])
+                ]
+                if len(containing) != 1:
+                    continue
+                other = event.markets[1 - anchor]
+                if _plausible(
+                    other, match[f"team{sides[1 - anchor]}_name"], candidates
+                ):
+                    orientations.add(tuple(match[f"team{s}_id"] for s in sides))
+                else:
+                    implausible = True
+        if orientations:
+            found.append((match, list(orientations)))
+    return found, implausible
+
+
 def _similar(a, b):
     a, b = sorted(set(normalize(a))), sorted(set(normalize(b)))
     return (
@@ -152,20 +230,18 @@ def _orientations(event, match, method, aliases):
         for market, side in zip(event.markets, sides):
             name, team_id = match[f"team{side}_name"], match[f"team{side}_id"]
             if method == "exact":
-                valid &= bool(normalize(name)) and normalize(
-                    market["team_name"]
-                ) == normalize(name)
+                valid &= _exact(market["team_name"], name)
             elif method == "alias":
                 valid &= aliases.get(market["competitor_id"]) == team_id
             else:
-                valid &= _similar(market["team_name"], name)
+                valid &= any(_similar(market["team_name"], v) for v in _variants(name))
         if valid:
             choices.append(tuple(match[f"team{s}_id"] for s in sides))
     return choices
 
 
 def link(kalshi_events, vlr_matches):
-    """Link series in three passes, then inherit their matches for map events.
+    """Iterate confident series links, then fuzzy-match and inherit map links.
 
     Matches are dictionaries; optional ``maps`` holds played map dictionaries.
     A map-only catalog supplies a representative event for the absent series.
@@ -212,27 +288,51 @@ def link(kalshi_events, vlr_matches):
         )
     resolved, evidence = {}, defaultdict(list)
     aliases = {}
-    for method in ("exact", "alias", "fuzzy"):
+
+    def learn():
+        return {
+            cid: rows[0][1]
+            for cid, rows in evidence.items()
+            if len({r[1] for r in rows}) == 1
+        }
+
+    def run_pass(method):
         for key, event in representatives.items():
             if key in resolved:
                 continue
             if len(event.markets) != 2:
                 reasons[key] = "expected two competitor markets"
                 continue
-            if method == "alias" and not all(
-                m.get("competitor_id") in aliases for m in event.markets
-            ):
-                continue
-            found = []
-            for match in candidates[key]:
-                orientations = _orientations(event, match, method, aliases)
-                if orientations:
-                    found.append((match, orientations))
+            if method == "anchor":
+                found, implausible = _anchors(event, candidates[key], aliases)
+                if implausible:
+                    reasons[key] = "anchor: other team implausible"
+            else:
+                found = []
+                for match in candidates[key]:
+                    orientations = _orientations(event, match, method, aliases)
+                    if method == "fuzzy":
+                        orientations = [
+                            ids
+                            for ids in orientations
+                            if all(
+                                _plausible(
+                                    market,
+                                    match[
+                                        f"team{1 if tid == match['team1_id'] else 2}_name"
+                                    ],
+                                    candidates[key],
+                                )
+                                for market, tid in zip(event.markets, ids)
+                            )
+                        ]
+                    if orientations:
+                        found.append((match, orientations))
             if len(found) == 1 and len(found[0][1]) == 1:
                 match, orientations = found[0]
                 team_ids = orientations[0]
                 resolved[key] = (match, method, team_ids)
-                if method == "exact":
+                if method != "fuzzy":
                     for market, team_id in zip(event.markets, team_ids):
                         if market.get("competitor_id"):
                             side = 1 if team_id == match["team1_id"] else 2
@@ -241,12 +341,15 @@ def link(kalshi_events, vlr_matches):
                             )
             elif found:
                 reasons[key] = f"ambiguous {method} candidates"
-        if method == "exact":
-            aliases = {
-                cid: rows[0][1]
-                for cid, rows in evidence.items()
-                if len({r[1] for r in rows}) == 1
-            }
+
+    while True:
+        before = len(resolved)
+        for method in ("exact", "alias", "anchor"):
+            run_pass(method)
+            aliases = learn()
+        if len(resolved) == before:
+            break
+    run_pass("fuzzy")
     learned = [
         Alias(
             cid,

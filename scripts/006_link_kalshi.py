@@ -53,10 +53,29 @@ def main():
                 "INSERT INTO kalshi_links VALUES (?, ?, ?, ?, ?, ?)",
                 tuple(row.values()),
             )
+    by_event = {event.event_ticker: event for event in events}
     report = ["Unlinked events / unplayed maps:"]
     report.extend(
-        f"{row.event_ticker}: {row.reason}" for row in result.links if row.reason
+        f"{row.event_ticker}: {row.reason}; "
+        + " vs ".join(m["team_name"] for m in by_event[row.event_ticker].markets)
+        + f"; scheduled={by_event[row.event_ticker].markets[0].get('scheduled_utc')}; "
+        + f"event={by_event[row.event_ticker].markets[0].get('event_name')}"
+        for row in result.links
+        if row.reason
     )
+    report.append("\nAnchor links:")
+    for row in result.links:
+        if row.method != "anchor":
+            continue
+        match = matches[row.match_id]
+        names = {match[f"team{s}_id"]: match[f"team{s}_name"] for s in (1, 2)}
+        report.append(
+            f"{row.event_ticker}: "
+            + "; ".join(
+                f"{market['team_name']} → {names.get(tid, 'unknown')}"
+                for market, tid in zip(by_event[row.event_ticker].markets, row.team_ids)
+            )
+        )
     report.append("\nResult mismatches:")
     report.extend(checked.mismatches)
     (directory / "link_report.txt").write_text("\n".join(report) + "\n")
