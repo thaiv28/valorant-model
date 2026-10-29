@@ -8,10 +8,14 @@ import pytest
 import test_evaluation as evaluation
 
 from promval.ratings.layers import (
+    FORM_STATS,
     HALF_LIVES,
+    LAYERS,
     REGIONS,
     FormLayer,
+    FormMultiLayer,
     RegionalFormLayer,
+    RegionalFormMultiLayer,
     RegionalLayer,
     causal_features,
 )
@@ -26,7 +30,9 @@ def history_db():
         CREATE TABLE events(event_id, region, international);
         CREATE TABLE matches(match_id, start_utc, team1_id, team2_id, event_id);
         CREATE TABLE maps(game_id, match_id, "order", score1, score2);
-        CREATE TABLE player_maps(game_id, player_id, team, rating);
+        CREATE TABLE player_maps(
+            game_id, player_id, team, rating, acs, kast, adr, fk, fd
+        );
     """)
     conn.executemany(
         "INSERT INTO events VALUES (?,?,?)",
@@ -57,7 +63,7 @@ def history_db():
     lineups = {game: ((100, 101, 999), (200,)) for game, _, _ in games}
     # 999 never has a rating, 101 starts fresh on map 2 then has a null map.
     conn.executemany(
-        "INSERT INTO player_maps VALUES (?,?,?,?)",
+        "INSERT INTO player_maps(game_id, player_id, team, rating) VALUES (?,?,?,?)",
         [
             (game, player, side, rating)
             for game, _, _ in games
@@ -90,7 +96,7 @@ def test_causal_homes_decay_missing_and_order():
         expected = (2 * decay**2 / (decay**2 + decay + 1) + 1) / 2
         assert features.loc[4, f"form1_{h}"] == pytest.approx(expected)
         assert features.loc[7, f"form2_{h}"] == 1
-    assert features.loc[4, "form1_5"] < features.loc[4, "form1_20"]
+    assert features.loc[4, "form1_5"] < features.loc[4, "form1_12"]
     conn.execute("UPDATE player_maps SET rating=100 WHERE game_id>=5")
     conn.execute("UPDATE maps SET score1=0,score2=13 WHERE game_id>=5")
     pd.testing.assert_frame_equal(
@@ -126,6 +132,10 @@ def planted(n=10000):
         features[f"form1_{h}"] = rng.normal(1, 0.4, n)
         features[f"form2_{h}"] = rng.normal(1, 0.4, n)
     effects = np.array([0.45, -0.35, 0.15, -0.25])
+    for h in HALF_LIVES:
+        for stat in FORM_STATS:
+            for side in (1, 2):
+                features[f"form{side}_{stat}_{h}"] = rng.normal(0, 2, n)
     return rng, frame, features, logits, effects[a] - effects[b]
 
 
@@ -179,24 +189,33 @@ def test_regional_threshold_ridge_and_refit():
 
 def test_form_recovery_selection_missing_and_clipping():
     rng, frame, features, logits, _ = planted()
-    delta = features.form1_10 - features.form2_10
+    delta = features.form1_3 - features.form2_3
     frame["won"] = sample(rng, logits + 2.3 * delta)
     layer = FormLayer()
     layer._features = features
     layer.fit(frame)
-    assert layer.half_life == 10
+    assert layer.half_life == 3
     assert layer.w == pytest.approx(2.3, abs=0.15)
     assert layer.rows == len(frame)
-    features.loc[0, "form1_10"] = np.nan
-    features.loc[1:2, "form1_10"] = [1e6, -1e6]
+    features.loc[0, "form1_3"] = np.nan
+    features.loc[1:2, "form1_3"] = [1e6, -1e6]
     adjusted = layer.apply(frame.iloc[:3])
     assert adjusted.iloc[0] == frame.p.iloc[0]
     assert adjusted.iloc[1] == 1 - 1e-6
     assert adjusted.iloc[2] == 1e-6
-    assert "H=10" in layer.describe() and "rows=10000" in layer.describe()
+    assert "H=3" in layer.describe() and "rows=10000" in layer.describe()
 
 
-@pytest.mark.parametrize("cls", [FormLayer, RegionalLayer, RegionalFormLayer])
+@pytest.mark.parametrize(
+    "cls",
+    [
+        FormLayer,
+        FormMultiLayer,
+        RegionalLayer,
+        RegionalFormLayer,
+        RegionalFormMultiLayer,
+    ],
+)
 def test_frozen_fit_uses_only_given_rows(cls):
     rng, frame, features, logits, effect = planted(1000)
     frame["won"] = sample(rng, logits + effect + features.form1_5 - features.form2_5)
@@ -214,15 +233,22 @@ def test_frozen_fit_uses_only_given_rows(cls):
     pd.testing.assert_series_equal(layer.apply(frame), frame.p)
 
 
-def test_combination_order_and_shared_cache():
+@pytest.mark.parametrize(
+    "combined_cls, form_cls",
+    [
+        (RegionalFormLayer, FormLayer),
+        (RegionalFormMultiLayer, FormMultiLayer),
+    ],
+)
+def test_combination_order_and_shared_cache(combined_cls, form_cls):
     rng, frame, features, logits, effect = planted(1500)
     frame["won"] = sample(
-        rng, logits + effect + 2 * (features.form1_20 - features.form2_20)
+        rng, logits + effect + 2 * (features.form1_12 - features.form2_12)
     )
-    combined = RegionalFormLayer()
+    combined = combined_cls()
     combined._features = features
     combined.fit(frame)
-    regional, form = RegionalLayer(), FormLayer()
+    regional, form = RegionalLayer(), form_cls()
     regional._features = form._features = features
     regional.fit(frame)
     adjusted = frame.copy()
@@ -232,14 +258,15 @@ def test_combination_order_and_shared_cache():
     assert combined.regional._features is combined.form._features is features
     assert (
         combined.describe()
-        == f"regional_form: {regional.describe()}; {form.describe()}"
+        == f"{combined.name}: {regional.describe()}; {form.describe()}"
     )
 
 
-def test_real_context_caches_once():
+@pytest.mark.parametrize("cls", [FormLayer, FormMultiLayer, RegionalFormMultiLayer])
+def test_real_context_caches_once(cls):
     conn, lineups = history_db()
     frame = pd.DataFrame({"game_id": [3, 4, 5], "p": [0.4, 0.5, 0.6], "won": [0, 1, 0]})
-    layer = FormLayer({"conn": conn, "lineups": lineups})
+    layer = cls({"conn": conn, "lineups": lineups})
     layer.fit(frame)
     prediction = layer.apply(frame)
     cached = layer._features
@@ -264,7 +291,7 @@ def test_end_to_end_layers(database, tmp_path, monkeypatch):
             "--report-models",
             "team_elo",
             "--layers",
-            "regional,form,regional_form",
+            "regional,form,regional_form,form_multi,regional_form_multi",
             "--k-grid",
             "32",
             "--jobs",
@@ -274,8 +301,121 @@ def test_end_to_end_layers(database, tmp_path, monkeypatch):
         ]
     )
     report = out.read_text()
-    for name in ("regional", "form", "regional_form"):
+    for name in (
+        "regional",
+        "form",
+        "regional_form",
+        "form_multi",
+        "regional_form_multi",
+    ):
         section = report.split(f"### team_elo+{name}: Kalshi comparison and returns")[1]
         assert section.lstrip().startswith(f"{name}: ")
         assert "rows=" in section.split("####")[0]
         assert f"team_elo+{name} − team_elo" in report
+
+
+def test_multi_stat_causality_nulls_and_fkfd():
+    conn, lineups = history_db()
+    conn.execute("UPDATE player_maps SET acs=100, kast=70, adr=120, fk=5, fd=2")
+    conn.execute("UPDATE player_maps SET acs=NULL WHERE game_id=2")
+    conn.execute("UPDATE player_maps SET fk=NULL WHERE game_id=1 AND player_id=100")
+    features = causal_features(conn, lineups)
+    assert HALF_LIVES == (2, 3, 5, 8, 12)
+    for h in HALF_LIVES:
+        for stat in FORM_STATS:
+            assert np.isnan(features.loc[1, f"form1_{stat}_{h}"])
+        assert features.loc[3, f"form1_acs_{h}"] == pytest.approx(100)
+        assert features.loc[2, f"form2_fkfd_{h}"] == pytest.approx(3)
+        assert features.loc[3, f"form1_fkfd_{h}"] == pytest.approx(3)
+        pd.testing.assert_series_equal(
+            features[f"form1_rating_{h}"], features[f"form1_{h}"], check_names=False
+        )
+    conn.execute(
+        "UPDATE player_maps SET acs=999, kast=99, adr=999, fk=99, fd=0 WHERE game_id>=5"
+    )
+    pd.testing.assert_frame_equal(
+        features.loc[:5], causal_features(conn, lineups).loc[:5]
+    )
+    # Null appearances age earlier weights without adding observations.
+    conn.execute("UPDATE player_maps SET acs=NULL")
+    conn.execute("UPDATE player_maps SET acs=100 WHERE game_id=1 AND player_id=100")
+    conn.execute("UPDATE player_maps SET acs=200 WHERE game_id=3 AND player_id=100")
+    features = causal_features(conn, lineups)
+    for h in HALF_LIVES:
+        decay = 0.5 ** (1 / h)
+        assert features.loc[4, f"form1_acs_{h}"] == pytest.approx(
+            (100 * decay**2 + 200) / (decay**2 + 1)
+        )
+    conn.close()
+
+
+def test_multi_recovery_selection_scales_and_missing():
+    _, frame, features, logits, _ = planted(2000)
+    h = 8
+    multipliers = np.array([0.2, 100, 10, 80, 3])
+    for stat, scale in zip(FORM_STATS, multipliers, strict=True):
+        for side in (1, 2):
+            features[f"form{side}_{stat}_{h}"] *= scale
+    delta = np.column_stack(
+        [
+            features[f"form1_{stat}_{h}"] - features[f"form2_{stat}_{h}"]
+            for stat in FORM_STATS
+        ]
+    )
+    scales = delta.std(axis=0)
+    weights = np.array([0.6, -0.4, 0.3, 0.5, -0.7])
+    # Exact fractional targets isolate fitting from sampling noise.
+    frame["won"] = 1 / (1 + np.exp(-(logits + delta / scales @ weights)))
+    layer = FormMultiLayer()
+    layer._features = features
+    layer.fit(frame)
+    assert LAYERS["form_multi"] is FormMultiLayer
+    assert LAYERS["regional_form_multi"] is RegionalFormMultiLayer
+    assert layer.half_life == h
+    assert layer.weights == pytest.approx(weights, abs=0.01)
+    assert layer.scales == pytest.approx(scales)
+    assert layer.rows == len(frame)
+    assert "H=8" in layer.describe() and "rows=2000" in layer.describe()
+    assert all(stat + "=" in layer.describe() for stat in FORM_STATS)
+    # Every missing-stat position leaves the corresponding row untouched.
+    for i, stat in enumerate(FORM_STATS):
+        features.loc[i, f"form1_{stat}_{h}"] = np.nan
+    apply = frame.iloc[:8].copy()
+    apply.index = [8, 3, 3, 7, 2, 0, 1, 5]
+    adjusted = layer.apply(apply)
+    assert adjusted.index.equals(apply.index)
+    assert adjusted.iloc[:5].tolist() == apply.p.iloc[:5].tolist()
+    # Validation's shifted spread must not refit scales or center features.
+    features.loc[5:7, f"form1_rating_{h}"] += 20
+    frozen = layer.scales.copy()
+    adjusted = layer.apply(apply)
+    raw = layer._difference(apply, h)[5:]
+    expected = 1 / (1 + np.exp(-(logits[5:8] + raw / scales @ layer.weights)))
+    assert adjusted.iloc[5:].to_numpy() == pytest.approx(
+        np.clip(expected, 1e-6, 1 - 1e-6)
+    )
+    np.testing.assert_array_equal(layer.scales, frozen)
+
+
+def test_multi_stage1_scales_and_constant_features():
+    _, frame, features, logits, _ = planted(120)
+    frame["won"] = 1 / (1 + np.exp(-logits))
+    for h in HALF_LIVES:
+        features[f"form1_acs_{h}"] = features[f"form2_acs_{h}"]
+    layer = FormMultiLayer()
+    layer._features = features
+    layer.fit(frame.iloc[:80])
+    h = layer.half_life
+    difference = layer._difference(frame, h)
+    expected = difference[:80].std(axis=0)
+    expected[expected == 0] = 1
+    np.testing.assert_allclose(layer.scales, expected)
+    assert np.isfinite(layer.apply(frame)).all()
+    features.loc[80:, f"form1_rating_{h}"] = 1e6
+    layer.fit(frame.iloc[:80])
+    np.testing.assert_allclose(layer.scales, expected)
+    # All missing and empty stage-1 samples both reset to identity.
+    features.loc[:, :] = np.nan
+    layer.fit(frame)
+    assert layer.rows == 0
+    pd.testing.assert_series_equal(layer.apply(frame), frame.p)
