@@ -2,10 +2,15 @@
 
 Every model idea tested, adopted or not, newest first, with its numbers. Rules: [tech.md, Model change rules](../steering/tech.md). Entries before the two-stage benchmark (2026-10-28) were run on a partial crawl with parameters selected in-sample; they are leads, not verdicts, and are rerun on the full history.
 
-## Pending full-data two-stage run
+## Two-stage runs
 
-- **Regional calibration and form layers (2026-10-28).** `regional`: ridge-shrunk region effects and a scale on cross-region maps; `form`: starters' recent VLR rating. Built; not yet benchmarked.
-- **Rookie discount and tier moves (2026-10-28).** Prometheus's logarithmic rookie discount and move-up/move-down adjustments by tier (collegiate < T3 < VCL < VCT). Built; not yet benchmarked.
+Partial crawl (VLR from 2024-06-26, 7,597 matches): seed Jun–Sep 2024, stage 1 Oct 2024 – Aug 2025 (8,241 maps), stage 2 Sep 2025 – Jun 2026 (6,337 maps; Kalshi had no Valorant markets Oct–Dec 2025, so market rows are Sep 2025 and Jan–Jun 2026). Δ = candidate − base map log loss, paired bootstrap by match. Report: [`docs/elo_backtest.md`](../elo_backtest.md). Rerun on the full crawl.
+
+- **Form layer (2026-10-28): adopted (candidate).** Starters' recent VLR rating, logit p′ = logit p + w·(form₁ − form₂), fitted on stage 1 (H = 5 maps, the grid's smallest; w = 1.41). Over `player_round_glicko_rookie`: stage 1 −0.0030 [−0.0047, −0.0013], stage 2 −0.0027 [−0.0045, −0.0010]; VCL significant on both; no section worse. Next: H < 5.
+- **Regional calibration layer (2026-10-28): not adopted (retest on full history).** Ridge-4 region effects and scale on cross-region maps (327 stage-1 rows; China −0.30, Americas +0.20, s = 0.97): stage 1 −0.0004 (not significant, below 0.0005); stage 2 international −0.011 [−0.024, +0.001].
+- **Rookie discount (2026-10-28): adopted (candidate).** Prometheus's log1p discount (chose penalty 200, 100 maps, both grid maxima). Over `player_round_glicko`: stage 1 −0.0046 [−0.0072, −0.0020], GC −0.0097 significant; stage 2 −0.0070 [−0.0099, −0.0040], VCL significant; no section worse. Next: larger grid.
+- **Tier moves (2026-10-28): rejected.** Move-up penalty / move-down bonus by tier: stage 1 −0.0001, stage 2 +0.0002 (no effect).
+- **Combined (`player_round_glicko_rookie+form`), stage 2 vs Kalshi (tradeable quotes, LoL-capped Kelly):** raw series −0.011, maps −0.011 (n.s.; international series −0.054 significant); blended series −0.017 (significant), maps +0.003. Flat ROI raw series+map +18.0% [+5.5, +31.6], $50 → $5,243; blended series +17.4% [+4.0, +31.2], $50 → $553. Map raw ROI concentrated in April 2026 (+63%).
 
 ## Partial-crawl leads (in-sample, pre-two-stage)
 
