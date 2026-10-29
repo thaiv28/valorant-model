@@ -115,3 +115,13 @@ def test_roi_interval_resamples_whole_matches_deterministically():
     assert (first["roi_low"], first["roi_high"]) == pytest.approx(
         np.percentile(expected, [2.5, 97.5])
     )
+
+
+def test_alternative_probability_selects_and_sizes_blended_bets():
+    frame = rows({"p_blend": 0.1}, {"p_blend": 0.5})
+    bets = select_bets(frame, probability="p_blend")
+    assert len(bets) == 1
+    assert bets.iloc[0]["side"] == 2
+    expected = frame.copy()
+    expected["p"] = frame.p_blend
+    assert summarize(frame, probability="p_blend") == summarize(expected)

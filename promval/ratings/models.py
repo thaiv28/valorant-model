@@ -52,11 +52,11 @@ for region in (False, True):
         EloModel, unit="player", credit="round", rd=True, region_k=4 if region else 0
     )
     PARAM_GRIDS[name] = {
-        "k": (8, 12, 16, 24, 32, 48),
+        "k": (16, 24, 32, 48, 64),
         "tau": (0.4, 0.5, 0.6, 0.8),
-        "rd_new": (200, 280, 350),
-        "rd_info": (0.0625, 0.125, 0.25),
+        "rd_new": (280, 350, 450, 600),
+        "rd_info": (0.125, 0.25, 0.5, 1.0),
         "new_player": ("fixed", "teammates"),
     }
     if region:
-        PARAM_GRIDS[name]["region_k"] = (2, 4, 8)
+        PARAM_GRIDS[name]["region_k"] = (2, 4)
