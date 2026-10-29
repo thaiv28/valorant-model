@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-29 — Backtest realism: rounded fees, depth caps, quote robustness, series check
+
+Branch `realism`, base `main`. Added cent-ceiling order fees, $1 contract stakes with fee-inclusive flat ROI, rounded-fee Kelly cash sizing, and tape-volume depth caps (6 hours, 50%; missing tapes unfilled). Returns pair unlimited and capped fills. Added 24/6-hour quote rules, frozen-model quote robustness, and standalone/in-report series calibration, conditional map-2 and decider residual checks. Tests cover fees, depth/orientation, cash caps, quote cutoffs, report assembly without retuning, planted dependence and calibration counts. Baseline: 235 tests in 26.19s. Checks: `uv run pytest -q` (252 passed, 22.38s), `uv run ruff format --check`, `uv run ruff check`, and `git diff --check` passed. Plain offline `uv run` hits the local startup panic; checks use `UV_OFFLINE=1 UV_NO_SYNC=1`. Limits: no network, real-data benchmark or holdout evaluation; tape volume is a fill proxy without queue position/slippage. Changes uncommitted as requested.
+
 ## 2026-10-28 — First two-stage benchmark (partial crawl)
 
 Data and docs only. Rebuilt on the crawl so far (7,597 matches from 2024-06) and ran the two-stage benchmark: stage 1 Oct 2024 – Aug 2025, stage 2 Sep 2025 – Jun 2026. Adopted (candidates, to rerun on full history): rookie discount (stage 1 −0.0046, stage 2 −0.0070, both significant) and the form layer (−0.0030 / −0.0027). Rejected: tier moves (no effect). Regional calibration not significant on 327 cross-region maps. Best, `player_round_glicko_rookie+form`: blended series vs Kalshi −0.017 (significant). Committed `docs/elo_backtest.md`; ledger updated. Checks: pytest.

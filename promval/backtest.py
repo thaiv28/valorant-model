@@ -1,8 +1,14 @@
-"""Kalshi taker backtest with unrounded fees and match-level settlement.
+"""Kalshi taker backtest with rounded order fees and match-level settlement.
 
 Quotes are oriented to VLR team1. Fills assume the last pre-start hourly ask/bid,
-with unlimited depth and no slippage. Each summary is an independent $50 path.
+with optional tape-based depth caps and no slippage. Each summary is an independent $50 path.
 """
+
+import gzip
+import json
+from decimal import ROUND_CEILING, Decimal
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,11 +21,122 @@ def fee(cost):
     return 0.07 * cost * (1 - cost)
 
 
+def order_fee(contracts, price):
+    """Dollar fee per order, rounded up using decimal arithmetic."""
+    c, p = Decimal(str(contracts)), Decimal(str(price))
+    return float(
+        (Decimal("0.07") * c * p * (1 - p)).quantize(
+            Decimal("0.01"), rounding=ROUND_CEILING
+        )
+    )
+
+
+@lru_cache(maxsize=4096)
+def _tape(path):
+    if not Path(path).exists():
+        return ()
+    with gzip.open(path, "rt") as handle:
+        return tuple(
+            (
+                pd.Timestamp(t["created_time"]).timestamp(),
+                float(t["count_fp"]),
+                float(t["yes_price_dollars"]),
+            )
+            for line in handle
+            if (t := json.loads(line))
+        )
+
+
+def depth_limits(frame, directory, window_hours=6, share=0.5):
+    """Attach available contracts on each oriented side; missing tapes never fill."""
+    if not np.isfinite(window_hours) or window_hours < 0 or not 0 <= share <= 1:
+        raise ValueError("depth window must be nonnegative and share in [0,1]")
+    result = frame.copy()
+    limits = {1: [], 2: []}
+    for row in frame.itertuples():
+        tape = _tape(str(Path(directory) / "trades" / f"{row.ticker}.jsonl.gz"))
+        for side in (1, 2):
+            yes = (side == 1) == row.team1_side
+            price = row.ask if side == 1 else 1 - row.bid
+            threshold = price if yes else 1 - price
+            limits[side].append(
+                share
+                * sum(
+                    count
+                    for ts, count, p in tape
+                    if row.quote_ts <= ts <= row.quote_ts + window_hours * 3600
+                    and (p <= threshold + 1e-12 if yes else p >= threshold - 1e-12)
+                )
+            )
+    for side in (1, 2):
+        result[f"depth{side}"] = limits[side]
+    return result
+
+
+def _affordable(stake, price, budget):
+    """Largest contract stake within a cash budget, fee charged on top."""
+    lo, hi = 0.0, min(stake, budget)
+    if hi + order_fee(hi / price, price) <= budget:
+        return hi
+    for _ in range(55):
+        mid = (lo + hi) / 2
+        if mid + order_fee(mid / price, price) <= budget:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _settle(match, stakes, budget):
+    # Hand-built historical path fixtures have no price column.
+    if "price" not in match:
+        return (
+            float(np.dot(stakes, match["profit"])),
+            float(sum(stakes)),
+            float(max(stakes, default=0)),
+        )
+    # Kelly fractions and execution limits are cash budgets. Convert each to
+    # a contract stake with its own rounded fee, then apply available depth.
+    stakes = np.array(
+        [
+            _affordable(target, price, target)
+            for target, price in zip(stakes, match.price)
+        ]
+    )
+    stakes = np.minimum(stakes, match.get("max_contracts", float("inf")) * match.price)
+
+    def outlay(scale):
+        return sum(
+            stake * scale + order_fee(stake * scale / price, price)
+            for stake, price in zip(stakes, match.price)
+            if stake > 0
+        )
+
+    if outlay(1.0) > budget:
+        lo, hi = 0.0, 1.0
+        for _ in range(55):
+            mid = (lo + hi) / 2
+            if outlay(mid) <= budget:
+                lo = mid
+            else:
+                hi = mid
+        stakes = stakes * lo
+    remaining, profit, largest = budget, 0.0, 0.0
+    for (_, bet), stake in zip(match.iterrows(), stakes):
+        stake = min(stake, bet.get("max_contracts", float("inf")) * bet.price)
+        stake = _affordable(stake, bet.price, remaining)
+        charge = order_fee(stake / bet.price, bet.price) if stake > 0 else 0
+        remaining -= stake + charge
+        profit += stake / bet.price * bet.side_won - stake - charge
+        largest = max(largest, stake)
+    return profit, budget - remaining, largest
+
+
 def select_bets(frame, probability="p"):
     """Choose the larger positive after-fee edge; skip incomplete quotes.
 
     Returned ``cost`` includes fees, ``fraction`` is full Kelly, and ``profit``
-    is realized profit for a flat $1 all-in stake.
+    is realized profit for $1 of contracts, with fees extra.
     """
     bets = frame.copy()
     for name in ("ask", "bid", probability, "won", "match_id", "start_utc"):
@@ -43,7 +160,14 @@ def select_bets(frame, probability="p"):
     bets = bets.loc[bets["edge"] > 0].copy()
     bets["fraction"] = bets["edge"] / (1 - bets["cost"])
     bets["side_won"] = np.where(bets["side"] == 1, bets["won"], 1 - bets["won"])
-    bets["profit"] = bets["side_won"] / bets["cost"] - 1
+    bets["order_fee"] = [order_fee(1 / price, price) for price in bets.price]
+    bets["outlay"] = 1 + bets["order_fee"]
+    bets["profit"] = bets["side_won"] / bets["price"] - bets["outlay"]
+    bets["max_contracts"] = np.where(
+        bets["side"] == 1,
+        bets.get("depth1", float("inf")),
+        bets.get("depth2", float("inf")),
+    )
     return bets.reset_index(drop=True)
 
 
@@ -51,7 +175,7 @@ def kelly_path(bets, initial=50.0):
     """Settle each match together, sizing all its bets from pre-match capital.
 
     Returns the settled bankroll path (including initial capital), maximum
-    fractional drawdown, and largest single all-in stake in dollars.
+    fractional drawdown, and largest single contract stake in dollars (fees extra).
     """
     bankroll = float(initial)
     path = [bankroll]
@@ -62,8 +186,9 @@ def kelly_path(bets, initial=50.0):
             fractions = match["fraction"].to_numpy(dtype=float)
             fractions = fractions / max(1.0, fractions.sum())
             stakes = bankroll * fractions
-            largest = max(largest, float(stakes.max()))
-            bankroll += float(np.dot(stakes, match["profit"]))
+            result, _, biggest = _settle(match, stakes, bankroll)
+            largest = max(largest, biggest)
+            bankroll += result
             # Prevent tiny negative balances from floating-point cancellation.
             bankroll = max(0.0, bankroll)
             path.append(bankroll)
@@ -123,9 +248,12 @@ def capped_path(bets, initial=50.0, sizing=LOL_SIZING):
                     continue
                 if total > limit:
                     stakes = stakes * (limit / total)
-                spent += float(stakes.sum())
-                largest = max(largest, float(stakes.max()))
-                result += float(np.dot(stakes, match["profit"]))
+                gain, outlay, biggest = _settle(
+                    match, stakes, min(limit, capital - spent)
+                )
+                spent += outlay
+                largest = max(largest, biggest)
+                result += gain
             bankroll = max(0.0, bankroll + result)
             path.append(bankroll)
     values = np.asarray(path)
@@ -135,25 +263,43 @@ def capped_path(bets, initial=50.0, sizing=LOL_SIZING):
     return path, drawdown, largest
 
 
-def summarize(frame, n_resamples=2000, seed=0, probability="p", sizing="lol"):
+def summarize(
+    frame, n_resamples=2000, seed=0, probability="p", sizing="lol", depth=False
+):
     """Flat ROI with whole-match bootstrap and a Kelly path (`lol` caps or `full`)."""
     bets = select_bets(frame, probability=probability)
-    path, drawdown, largest = capped_path(bets) if sizing == "lol" else kelly_path(bets)
+    selected = len(bets)
+    path_bets = bets.copy()
+    if depth:
+        path_bets["max_contracts"] = np.where(
+            path_bets.side == 1,
+            path_bets.get("depth1", 0.0),
+            path_bets.get("depth2", 0.0),
+        )
+        bets["max_contracts"] = path_bets["max_contracts"]
+        bets = bets[bets.max_contracts + 1e-12 >= 1 / bets.price].copy()
+    else:
+        path_bets["max_contracts"] = float("inf")
+    path, drawdown, largest = (
+        capped_path(path_bets) if sizing == "lol" else kelly_path(path_bets)
+    )
     low = high = roi = mean_edge = float("nan")
     if not bets.empty:
         profits = bets["profit"].to_numpy()
         codes, labels = pd.factorize(bets["match_id"])
         sums = np.bincount(codes, weights=profits)
-        counts = np.bincount(codes)
+        counts = np.bincount(codes, weights=bets["outlay"])
         draws = [
             sums[pick].sum() / counts[pick].sum()
             for pick in resamples(len(labels), n_resamples, seed)
         ]
-        low, high = interval(draws)
-        roi = float(profits.mean())
+        if draws:
+            low, high = interval(draws)
+        roi = float(profits.sum() / bets["outlay"].sum())
         mean_edge = float(bets["edge"].mean())
     return {
         "bets": len(bets),
+        "unfilled": selected - len(bets),
         "matches": bets["match_id"].nunique() if not bets.empty else 0,
         "mean_edge": mean_edge,
         "flat_roi": roi,
