@@ -107,3 +107,72 @@ def test_feed_data_shell_syntax():
     text = script.read_text()
     assert "valorant-model/feed/predictions.json" in text
     assert "--if-match" in text and "--if-none-match" in text
+
+
+def test_refresh_db_input_hash_and_exact_cache():
+    text = (WORKFLOW.parent / "refresh-db.yml").read_text()
+    assert "hashFiles('scripts/**', 'promval/**', 'uv.lock')" in text
+    assert (
+        "find data/vlr data/kalshi -type f -not -path '*/books/*' -printf '%P %s\\n'"
+        in text
+    )
+    assert "LC_ALL=C sort; printf" in text
+    assert "sha256sum" in text
+    assert text.count("key: db-${{ steps.inputs.outputs.hash }}") == 2
+    restore = text.split("id: db\n", 1)[1].split("      - name:", 1)[0]
+    assert "path: db" in restore
+    assert "restore-keys:" not in restore
+    assert text.index("name: Crawl") < text.index("name: Hash DB inputs")
+
+
+def test_refresh_db_skip_requires_cache_and_matching_state():
+    text = (WORKFLOW.parent / "refresh-db.yml").read_text()
+    assert "DB_CACHE_HIT: ${{ steps.db.outputs.cache-hit }}" in text
+    guard = text.split("name: Check rebuild", 1)[1].split("name: Build DB", 1)[0]
+    assert 'if [ "$DB_CACHE_HIT" = "true" ]; then' in guard
+    assert "--key valorant-model/feed/state.pkl.gz --query Metadata.inputs" in guard
+    assert 'if [ "$state_inputs" = "$INPUTS" ]; then' in guard
+    assert 'echo "skip=true" >> "$GITHUB_OUTPUT"' in guard
+    assert "Unchanged inputs; skipped rebuild" in guard
+    for step in ("Build DB", "Save ratings snapshot", "Publish blend artifact"):
+        block = text.split(f"name: {step}\n", 1)[1].split("      - ", 1)[0]
+        assert "if: steps.rebuild.outputs.skip != 'true'" in block
+    save = text.rsplit("uses: actions/cache/save@v4", 1)[1]
+    assert "if: steps.rebuild.outputs.skip != 'true'" in save
+    assert '--metadata inputs="$INPUTS"' in text
+    assert "uv run promval blend-artifact --out data/feed/blend_artifact.json" in text
+    assert (
+        'aws s3 cp data/feed/blend_artifact.json "s3://$BUCKET/valorant-model/feed/blend_artifact.json" --content-type application/json --only-show-errors'
+        in text
+    )
+    assert "promval/blend_artifact.json" not in text
+
+
+def test_refresh_db_cold_and_weekly_seeds():
+    text = (WORKFLOW.parent / "refresh-db.yml").read_text()
+    seed = text.split("name: Seed cold raw cache\n", 1)[1].split("      - name:", 1)[0]
+    assert "if: steps.raw.outputs.cache-matched-key == ''" in seed
+    assert "continue-on-error: true" in seed
+    assert (
+        'aws s3 cp "s3://$BUCKET/valorant-model/seed/raw.tar.zst" - | tar -I zstd -xf -'
+        in seed
+    )
+    assert text.index("name: Seed cold raw cache") < text.index(
+        "name: Top up raw cache"
+    )
+    assert text.index("name: Top up raw cache") < text.index("find data/vlr/parsed")
+    weekly = text.split("name: Refresh weekly raw seed\n", 1)[1].split(
+        "      - name:", 1
+    )[0]
+    assert "if: steps.raw_save.outcome == 'success'" in weekly
+    assert "id: raw_save" in text
+    assert "continue-on-error: true" in weekly
+    assert "--query LastModified" in weekly
+    assert '[ -z "$modified" ]' in weekly
+    assert "-gt 604800" in weekly
+    assert (
+        "tar -I 'zstd -T0 -3' -cf - --exclude='*/books/*' data/vlr data/kalshi"
+        in weekly
+    )
+    assert "--expected-size 3000000000" in weekly
+    assert text.index("id: raw_save") < text.index("name: Build DB")

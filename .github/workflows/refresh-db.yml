@@ -40,10 +40,22 @@ jobs:
           key: raw-${{ github.run_id }}
           restore-keys: raw-
       - name: Mark raw cache
+        env:
+          RESTORED_KEY: ${{ steps.raw.outputs.cache-matched-key }}
         run: |
+          if [ -n "$RESTORED_KEY" ]; then
+            echo "Raw cache: hit" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Raw cache: miss" >> "$GITHUB_STEP_SUMMARY"
+          fi
           touch "$RUNNER_TEMP/raw-marker"
           mkdir -p data/vlr data/kalshi
           find data/vlr data/kalshi -type f -printf '%p %s %T@\n' | sort > "$RUNNER_TEMP/raw-before"
+      - name: Seed cold raw cache
+        if: steps.raw.outputs.cache-matched-key == ''
+        continue-on-error: true
+        run: |
+          aws s3 cp "s3://$BUCKET/valorant-model/seed/raw.tar.zst" - | tar -I zstd -xf -
       - name: Top up raw cache
         env:
           RESTORED_KEY: ${{ steps.raw.outputs.cache-matched-key }}
@@ -74,19 +86,74 @@ jobs:
             echo "save=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/cache/save@v4
+        id: raw_save
         if: steps.changed.outputs.save == 'true'
         with:
           path: |
             data/vlr
             data/kalshi
           key: raw-${{ github.run_id }}
+      - name: Refresh weekly raw seed
+        if: steps.raw_save.outcome == 'success'
+        continue-on-error: true
+        run: |
+          modified=$(aws s3api head-object --bucket "$BUCKET" --key valorant-model/seed/raw.tar.zst --query LastModified --output text 2>/dev/null || true)
+          if [ -z "$modified" ] || [ "$modified" = "None" ] || [ "$(( $(date +%s) - $(date -d "$modified" +%s) ))" -gt 604800 ]; then
+            tar -I 'zstd -T0 -3' -cf - --exclude='*/books/*' data/vlr data/kalshi | aws s3 cp - "s3://$BUCKET/valorant-model/seed/raw.tar.zst" --expected-size 3000000000 --only-show-errors
+          fi
+      - name: Hash DB inputs
+        id: inputs
+        env:
+          CODE_HASH: ${{ hashFiles('scripts/**', 'promval/**', 'uv.lock') }}
+        run: |
+          INPUTS=$({ find data/vlr data/kalshi -type f -not -path '*/books/*' -not -path 'data/vlr/parsed/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; printf '%s\n' "$CODE_HASH"; } | sha256sum | cut -d ' ' -f 1)
+          echo "hash=$INPUTS" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: db
+        with:
+          path: db
+          key: db-${{ steps.inputs.outputs.hash }}
+      - name: Check rebuild
+        id: rebuild
+        env:
+          DB_CACHE_HIT: ${{ steps.db.outputs.cache-hit }}
+          INPUTS: ${{ steps.inputs.outputs.hash }}
+        run: |
+          if [ "$DB_CACHE_HIT" = "true" ]; then
+            echo "DB cache: hit" >> "$GITHUB_STEP_SUMMARY"
+            state_inputs=$(aws s3api head-object --bucket "$BUCKET" --key valorant-model/feed/state.pkl.gz --query Metadata.inputs --output text 2>/dev/null || true)
+            if [ "$state_inputs" = "$INPUTS" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Unchanged inputs; skipped rebuild" >> "$GITHUB_STEP_SUMMARY"
+              echo "DB build: 0s (skipped)" >> "$GITHUB_STEP_SUMMARY"
+              echo "Artifact snapshots: skipped (unchanged inputs)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "DB cache: miss" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Build DB
+        if: steps.rebuild.outputs.skip != 'true'
         run: |
           started=$SECONDS
           bash scripts/setup_db.sh
           echo "DB build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rebuilt DB" >> "$GITHUB_STEP_SUMMARY"
       - name: Save ratings snapshot
+        if: steps.rebuild.outputs.skip != 'true'
+        env:
+          INPUTS: ${{ steps.inputs.outputs.hash }}
         run: |
           uv run promval feed-state | tee "$RUNNER_TEMP/state.log"
           tail -n 1 "$RUNNER_TEMP/state.log" >> "$GITHUB_STEP_SUMMARY"
-          aws s3 cp data/feed/state.pkl.gz "s3://$BUCKET/valorant-model/feed/state.pkl.gz" --only-show-errors
+          aws s3 cp data/feed/state.pkl.gz "s3://$BUCKET/valorant-model/feed/state.pkl.gz" --metadata inputs="$INPUTS" --only-show-errors
+      - uses: actions/cache/save@v4
+        if: steps.rebuild.outputs.skip != 'true'
+        with:
+          path: db
+          key: db-${{ steps.inputs.outputs.hash }}
+      - name: Publish blend artifact
+        if: steps.rebuild.outputs.skip != 'true'
+        run: |
+          uv run promval blend-artifact --out data/feed/blend_artifact.json | tee "$RUNNER_TEMP/artifact.log"
+          tail -n 1 "$RUNNER_TEMP/artifact.log" >> "$GITHUB_STEP_SUMMARY"
+          aws s3 cp data/feed/blend_artifact.json "s3://$BUCKET/valorant-model/feed/blend_artifact.json" --content-type application/json --only-show-errors

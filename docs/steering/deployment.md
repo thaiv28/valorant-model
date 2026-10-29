@@ -26,11 +26,11 @@ The manifest command rebuilds from histories present locally. `scripts/kalshi_da
 
 ## Site feed
 
-`refresh-db.yml` crawls incrementally, rebuilds SQLite and uploads a ratings snapshot hourly. `feed.yml` loads it without a DB, refreshes schedule/prices and publishes the feed. cron-job.org dispatches refresh-db hourly and feed every 10 minutes; GitHub schedules (`41 * * * *`, `7 * * * *`, UTC) are backups. Both allow manual dispatch, run only on main and serialize without cancellation.
+`refresh-db.yml` crawls hourly; an exact input-hash DB cache hit plus matching state metadata skips rebuilding and snapshotting. `feed.yml` loads it without a DB, refreshes schedule/prices and publishes the feed. cron-job.org dispatches refresh-db hourly and feed every 10 minutes; GitHub schedules (`41 * * * *`, `7 * * * *`, UTC) are backups. Both allow manual dispatch, run only on main and serialize without cancellation.
 
-S3 keys: `valorant-model/feed/{state.pkl.gz,predictions.json,valorant.json.gz,upcoming/}`; `valorant-model/feed/candidates.json` is private, read by Prometheus's execution Lambda; raw inputs: `valorant-model/vlr/` and `valorant-model/kalshi/` (books excluded on download). Seed the raw cache in S3 once before running refresh-db. The Actions cache accelerates raw downloads. Prediction-log writes require an unchanged ETag; races warn and skip the save. Snapshots are trusted gzip pickles, version checked on load.
+S3 keys: `valorant-model/feed/{state.pkl.gz,predictions.json,valorant.json.gz,upcoming/}`; `valorant-model/feed/candidates.json` is private, read by Prometheus's execution Lambda; raw inputs: `valorant-model/vlr/` and `valorant-model/kalshi/` (books excluded on download). Seed the raw cache in S3 once before running refresh-db. Raw cache misses first extract `valorant-model/seed/raw.tar.zst`, then sync top-ups; successful raw cache saves refresh missing or week-old seeds. DB keys hash raw file paths/sizes (excluding books) plus scripts, package and lockfile. Rebuilds upload state with `inputs=<hash>` metadata and `valorant-model/feed/blend_artifact.json` for Prometheus’s Lambda. Prediction-log writes require an unchanged ETag; races warn and skip the save. Snapshots are trusted gzip pickles, version checked on load.
 
-Set `PROMETHEUS_DISPATCH_TOKEN` to enable dispatching `thaiv28/Prometheus`'s `games.yml` on main after publication; dispatch failure is nonfatal. `DATA_BACKUP_BUCKET`/`AWS_ROLE_ARN` are already set. Workflows have not yet run on GitHub; runner times are unmeasured.
+Set `PROMETHEUS_DISPATCH_TOKEN` to enable dispatching `thaiv28/Prometheus`'s `games.yml` on main after publication; dispatch failure is nonfatal. `DATA_BACKUP_BUCKET`/`AWS_ROLE_ARN` are already set. Unchanged hours skip rebuilds; measure runner timings after merge.
 
 ## Cost
 
