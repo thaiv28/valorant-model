@@ -10,6 +10,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from datetime import date
 from itertools import product
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from promval.backtest import summarize
+from promval.backtest import select_bets, summarize
 from promval.blend import walk_forward
 from promval.evaluation import (
     HOLDOUT_START,
@@ -29,6 +30,7 @@ from promval.evaluation import (
     series_probability,
 )
 from promval.kalshi.collect import data_dir
+from promval.ratings.layers import LAYERS
 from promval.ratings.models import MODELS, PARAM_GRIDS
 from promval.ratings.regions import macro_region
 from promval.ratings.replay import load_lineups, load_maps, replay
@@ -332,12 +334,45 @@ def summary_table(markets):
     return "\n".join(lines)
 
 
-def scored_rows(frame, score_from, holdout=False):
-    """Scoring windows never overlap; rating warmup is handled by replay."""
+def scored_rows(frame, start, end=HOLDOUT_START):
+    """Select an inclusive start and exclusive end without altering replay."""
     dates = pd.to_datetime(frame.start_utc, utc=True)
-    boundary = pd.Timestamp(HOLDOUT_START, tz="UTC")
-    mask = dates >= pd.Timestamp(score_from, tz="UTC")
-    return frame[mask & ((dates >= boundary) if holdout else (dates < boundary))]
+    mask = dates >= pd.Timestamp(start, tz="UTC")
+    if end is not None:
+        mask &= dates < pd.Timestamp(end, tz="UTC")
+    return frame.loc[mask].copy()
+
+
+def monthly_table(frame):
+    """All metrics share linked rows; unfitted blend months show dashes."""
+    lines = [
+        "| Kind | Month | Rows | Model log loss | Blended log loss | Kalshi log loss | Raw flat ROI (bets) | Blended flat ROI (bets) |",
+        "|---|---|---:|---:|---:|---:|---|---|",
+    ]
+    if frame.empty:
+        return "\n".join(lines)
+    monthly = frame.assign(
+        month=pd.to_datetime(frame.start_utc, utc=True).dt.strftime("%Y-%m")
+    )
+
+    def roi(rows, probability):
+        bets = select_bets(rows, probability=probability)
+        return f"{bets.profit.mean():.2%} ({len(bets)})" if len(bets) else "— (0)"
+
+    for (kind, month), rows in monthly.groupby(["kind", "month"], sort=True):
+        fitted = rows.blend_fitted.all()
+        raw_roi = roi(rows, "p")
+        blend_roi = roi(rows, "p_blend") if fitted else "—"
+        blend_loss = (
+            f"{game_losses(rows.p_blend, rows.won).log_loss.mean():.6f}"
+            if fitted
+            else "—"
+        )
+        lines.append(
+            f"| {kind} | {month} | {len(rows)} | {mean_loss(rows):.6f} | {blend_loss} | "
+            f"{game_losses(rows.market_p, rows.won).log_loss.mean():.6f} | {raw_roi} | {blend_roi} |"
+        )
+    return "\n".join(lines)
 
 
 def parameter_grid(model, k_grid=None):
@@ -347,16 +382,17 @@ def parameter_grid(model, k_grid=None):
     return [dict(zip(grid, values)) for values in product(*grid.values())]
 
 
-def initialize_worker(maps, lineups, score_from):
-    global _WORKER_MAPS, _WORKER_LINEUPS, _WORKER_SCORE_FROM
-    _WORKER_MAPS, _WORKER_LINEUPS, _WORKER_SCORE_FROM = maps, lineups, score_from
+def initialize_worker(maps, lineups, tune_from, tune_to):
+    global _WORKER_MAPS, _WORKER_LINEUPS, _WORKER_TUNE_FROM, _WORKER_TUNE_TO
+    _WORKER_MAPS, _WORKER_LINEUPS = maps, lineups
+    _WORKER_TUNE_FROM, _WORKER_TUNE_TO = tune_from, tune_to
 
 
 def tune_candidate(task):
     """Return just a scalar score, avoiding retention of all candidate replays."""
     name, params = task
     candidate = replay(_WORKER_MAPS, MODELS[name](lineups=_WORKER_LINEUPS, **params))
-    tuning = scored_rows(candidate, _WORKER_SCORE_FROM)
+    tuning = scored_rows(candidate, _WORKER_TUNE_FROM, _WORKER_TUNE_TO)
     return name, params, float(game_losses(tuning.p, tuning.won).log_loss.mean())
 
 
@@ -372,11 +408,15 @@ def main(argv=None):
     parser.add_argument("--models", default=",".join(n for n in MODELS if n != "coin"))
     parser.add_argument(
         "--report-models",
-        help="comma list; default team_elo, best three, both Glicko variants",
+        help="comma list; default team_elo, player_round_glicko, best two",
     )
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument("--k-grid", help="optional K grid override for every model")
-    parser.add_argument("--score-from", default="2023-01-01")
+    parser.add_argument("--seed-from")
+    parser.add_argument("--tune-from", default="2023-01-01")
+    parser.add_argument("--tune-to", default="2025-09-01")
+    parser.add_argument("--validate-from", default="2025-09-01")
+    parser.add_argument("--layers", default="none")
     parser.add_argument("--blend-min", type=int, default=100)
     parser.add_argument(
         "--quote",
@@ -400,17 +440,23 @@ def main(argv=None):
             not k_grid or any(not math.isfinite(k) or k <= 0 for k in k_grid)
         ):
             raise ValueError
-        score_start = pd.Timestamp(args.score_from, tz="UTC")
+        for value in (args.seed_from, args.tune_from, args.tune_to, args.validate_from):
+            if value is not None and date.fromisoformat(value).isoformat() != value:
+                raise ValueError
         if (
-            score_start >= pd.Timestamp(HOLDOUT_START, tz="UTC")
+            not (args.tune_from < args.tune_to <= args.validate_from <= HOLDOUT_START)
+            or (args.seed_from is not None and args.seed_from > args.tune_from)
             or args.jobs < 1
             or args.blend_min < 1
         ):
             raise ValueError
     except (ValueError, TypeError):
         parser.error(
-            "use positive finite K values, --jobs >= 1, --blend-min >= 1 and --score-from before 2026-07-01"
+            "use positive finite K values, --jobs >= 1, --blend-min >= 1 and ISO dates: seed-from <= tune-from < tune-to <= validate-from <= 2026-07-01"
         )
+    layer_names = list(dict.fromkeys(name.strip() for name in args.layers.split(",")))
+    if any(name not in LAYERS for name in layer_names):
+        parser.error("unknown layer in --layers")
     requested = [name.strip() for name in args.models.split(",")]
     if any(name not in MODELS for name in requested):
         parser.error("unknown model in --models")
@@ -423,11 +469,7 @@ def main(argv=None):
         name not in MODELS or name == "coin" for name in report_names
     ):
         parser.error("unknown rating model in --report-models")
-    extras = (
-        report_names
-        if report_names is not None
-        else ["player_round_glicko", "player_round_region_glicko"]
-    )
+    extras = report_names if report_names is not None else ["player_round_glicko"]
     names = list(
         dict.fromkeys(["team_elo", *(n for n in requested if n != "coin"), *extras])
     )
@@ -435,9 +477,11 @@ def main(argv=None):
         parser.error(f"database does not exist: {args.db}")
     with sqlite3.connect(args.db) as conn:
         maps = load_maps(conn)
+        if args.seed_from is not None:
+            maps = scored_rows(maps, args.seed_from, None)
         if not args.holdout:
             maps = maps[pd.to_datetime(maps.start_utc, utc=True) < HOLDOUT_START]
-        tuning_maps = scored_rows(maps, args.score_from)
+        tuning_maps = scored_rows(maps, args.tune_from, args.tune_to)
         if tuning_maps.empty:
             parser.error("no tuning maps in the requested scoring window")
         lineups = load_lineups(conn)
@@ -446,7 +490,12 @@ def main(argv=None):
         ]
         best_params, losses = {}, {}
         if args.jobs == 1:
-            initialize_worker(maps, lineups, args.score_from)
+            initialize_worker(
+                maps[maps.start_utc < args.tune_to],
+                lineups,
+                args.tune_from,
+                args.tune_to,
+            )
             for name, params, loss in map(tune_candidate, tasks):
                 if name not in losses or loss < losses[name]:
                     best_params[name], losses[name] = params, loss
@@ -454,7 +503,12 @@ def main(argv=None):
             with ProcessPoolExecutor(
                 max_workers=args.jobs,
                 initializer=initialize_worker,
-                initargs=(maps, lineups, args.score_from),
+                initargs=(
+                    maps[maps.start_utc < args.tune_to],
+                    lineups,
+                    args.tune_from,
+                    args.tune_to,
+                ),
             ) as pool:
                 for name, params, loss in pool.map(tune_candidate, tasks, chunksize=1):
                     if name not in losses or loss < losses[name]:
@@ -467,9 +521,8 @@ def main(argv=None):
                 dict.fromkeys(
                     [
                         "team_elo",
-                        *ranked[:3],
                         "player_round_glicko",
-                        "player_round_region_glicko",
+                        *ranked[:2],
                     ]
                 )
             )
@@ -478,14 +531,25 @@ def main(argv=None):
             name: replay(maps, MODELS[name](lineups=lineups, **best_params[name]))
             for name in names
         }
+        base_detailed = detailed.copy()
+        for name in base_detailed:
+            for layer_name in layer_names:
+                layer = LAYERS[layer_name](context={"conn": conn, "lineups": lineups})
+                layer.fit(scored_rows(winners[name], args.tune_from, args.tune_to))
+                adjusted = scored_rows(winners[name], args.validate_from, None)
+                adjusted["p"] = layer.apply(adjusted)
+                variant = f"{name}+{layer_name}"
+                winners[variant] = adjusted
+                detailed.append(variant)
         coin = replay(maps, MODELS["coin"]())
         fit_through = tuning_maps.start_utc.max()[:10]
         unknown = sum(macro_region(code) is None for code in maps.region)
         report = [
             "# Elo variants benchmark",
             "Parameters minimize tuning map log loss across all sections. Replay predicts before update; "
-            "2021–22 seed ratings only. "
-            f"Scoring starts {args.score_from}; tuning ends before {HOLDOUT_START}. "
+            f"Replay starts {args.seed_from or 'at the first map'}. "
+            f"Tuning: [{args.tune_from}, {args.tune_to}); validation: "
+            f"[{args.validate_from}, {HOLDOUT_START}). "
             "Holdout is scored only with --holdout and never selects parameters. "
             "Series use the first map prediction and independent maps in an odd best-of; "
             "missing/even best-of or unknown results are skipped. "
@@ -495,12 +559,12 @@ def main(argv=None):
             "negative favors the model. Significance requires a 95% percentile interval excluding zero. "
             "Tuning scores are selection diagnostics, not independent evidence of improvement.",
             f"Fit through {fit_through}. Unknown host-region map rows: {unknown} (including missing/un).",
-            "## Leaderboard (tuning only)\n\n"
+            "## Stage 1 — tuning (outcomes)\n\n### Leaderboard\n\n"
             "| Model | Best params | Map log loss | Series log loss | Rows |\n"
             "|---|---|---:|---:|---:|\n"
             + "\n".join(
                 f"| {name} | {json.dumps(best_params[name], sort_keys=True)} | {losses[name]:.6f} | "
-                f"{mean_loss(series_rows(scored_rows(winners[name], args.score_from))):.6f} | {len(tuning_maps)} |"
+                f"{mean_loss(series_rows(scored_rows(winners[name], args.tune_from, args.tune_to))):.6f} | {len(tuning_maps)} |"
                 for name in ranked
             ),
             (
@@ -514,8 +578,7 @@ def main(argv=None):
             )
             + "oriented to team1 using aliases. One contract per event, preferring team1. "
             "Compare identical rows; map predictions use the first map's pre-match chance. "
-            "Missing links, aliases or candles are skipped. Backtests are in-sample on the tuning window "
-            "(parameters were selected there). Fills are assumed at the hourly candle’s ask/bid with "
+            "Missing links, aliases or candles are skipped. Backtests use frozen stage-1 parameters on validation rows. Layers fit only tuning rows. Fills are assumed at the hourly candle’s ask/bid with "
             "no depth limit or slippage; unplayed maps are not in the rows. "
             "Kalshi taker fees use unrounded f(c)=0.07×c×(1−c) per contract. Buy the larger positive "
             "after-fee edge, otherwise skip; require a two-sided quote with both buy costs in (0,1). "
@@ -527,23 +590,42 @@ def main(argv=None):
         blended_markets, monthly_fits = {}, {}
         for name in detailed:
             source = winners[name]
-            source = source[pd.to_datetime(source.start_utc, utc=True) >= score_start]
+            source = scored_rows(source, args.validate_from, None)
             market = kalshi_rows(
                 conn, source, series_rows(source), data_dir(), quote_rule
             )
             blended_markets[name], monthly_fits[name] = walk_forward(
-                market, args.score_from, args.blend_min
+                market, args.validate_from, args.blend_min
             )
-        windows = [("Tuning", False)]
+        windows = [
+            ("Stage 1 — tuning (outcomes)", args.tune_from, args.tune_to),
+            ("Stage 2 — validation (outcomes)", args.validate_from, HOLDOUT_START),
+        ]
         if args.holdout:
-            windows.append(("Holdout", True))
-        for title, holdout in windows:
-            report.append(f"## {title}")
+            windows.append(("Holdout", HOLDOUT_START, None))
+        for title, start, end in windows:
+            tuning = start == args.tune_from and end == args.tune_to
+            holdout = title == "Holdout"
+            if not tuning:
+                report.append(f"## {title}")
+            window_names = base_detailed if tuning else detailed
             selected = {
-                name: scored_rows(frame, args.score_from, holdout)
-                for name, frame in winners.items()
+                name: scored_rows(frame, start, end) for name, frame in winners.items()
             }
-            coin_rows = scored_rows(coin, args.score_from, holdout)
+            coin_rows = scored_rows(coin, start, end)
+            if not tuning:
+                report.append(
+                    "### Leaderboard (frozen stage-1 parameters)\n\n"
+                    "| Model | Best params | Map log loss | Series log loss | Rows |\n"
+                    "|---|---|---:|---:|---:|\n"
+                    + "\n".join(
+                        f"| {name} | {json.dumps(best_params[name.split('+')[0]], sort_keys=True)} | "
+                        f"{mean_loss(selected[name]):.6f} | {mean_loss(series_rows(selected[name])):.6f} | {len(selected[name])} |"
+                        for name in sorted(
+                            window_names, key=lambda n: mean_loss(selected[n])
+                        )
+                    )
+                )
             for kind in ("Maps", "Series"):
                 frames = (
                     selected
@@ -552,13 +634,15 @@ def main(argv=None):
                 )
                 coin_frame = coin_rows if kind == "Maps" else series_rows(coin_rows)
                 report.extend([f"### {kind}", metrics_table(coin_frame, "coin")])
-                for name in detailed:
+                for name in window_names:
                     report.append(metrics_table(frames[name], name))
                     report.append(f"{name} − coin (paired log loss):")
                     report.append(
-                        comparison_table(frames[name], "coin_p", "coin", name)
+                        comparison_table(
+                            frames[name], "coin_p", "coin", name, by_section=not tuning
+                        )
                     )
-                for name in names:
+                for name in names if tuning else detailed:
                     if name == "team_elo":
                         continue
                     frame = frames[name].merge(
@@ -574,16 +658,22 @@ def main(argv=None):
                             frame, "baseline_p", "team_elo", name, by_section=False
                         )
                     )
+            if tuning:
+                continue
+            report.append(
+                "## Holdout vs Kalshi"
+                if holdout
+                else "## Stage 2 — validation vs Kalshi"
+            )
             markets = {
-                name: scored_rows(frame, args.score_from, holdout)
-                if not frame.empty
-                else frame
+                name: scored_rows(frame, start, end) if not frame.empty else frame
                 for name, frame in blended_markets.items()
             }
             if not holdout:
                 top_summary = summary_table(markets)
                 report.insert(
-                    1, "## Combined summary (tuning, all sections)\n\n" + top_summary
+                    1,
+                    "## Combined summary (validation, all sections)\n\n" + top_summary,
                 )
             for name, market in markets.items():
                 report.append(f"### {name}: Kalshi comparison and returns")
@@ -601,6 +691,17 @@ def main(argv=None):
                 excluded = int((~market.blend_fitted).sum())
                 loss_table, bet_table = market_tables(market, probability="p_blend")
                 fits = monthly_fits[name]
+                if not fits.empty:
+                    months = (
+                        set(
+                            pd.to_datetime(market.start_utc, utc=True).dt.strftime(
+                                "%Y-%m"
+                            )
+                        )
+                        if not market.empty
+                        else set()
+                    )
+                    fits = fits[fits.month.isin(months)]
                 fit_lines = [
                     "| Month | Kind | n | a | b | Status |",
                     "|---|---|---:|---:|---:|---|",
@@ -613,7 +714,7 @@ def main(argv=None):
                 report.extend(
                     [
                         "#### Monthly market blend fits",
-                        f"UTC monthly fits use earlier rows of the same kind from {args.score_from}, "
+                        f"UTC monthly fits use earlier rows of the same kind from {args.validate_from}, "
                         f"excluding holdout; minimum {args.blend_min} rows. "
                         "logit(p_blend) = a·logit(mid) + b·(logit(p_model) − logit(mid)); "
                         "inputs clipped to [0.01, 0.99], no intercept, ridge 1e-6. "
@@ -624,6 +725,9 @@ def main(argv=None):
                         loss_table,
                         "#### Full-Kelly returns (blended)",
                         bet_table,
+                        "#### Monthly breakdown",
+                        "All metrics use identical linked rows within each kind/month. Unfitted blend months show —; counts include all rows.",
+                        monthly_table(market),
                     ]
                 )
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -640,7 +744,10 @@ def main(argv=None):
             )
             + "\n"
         )
-    print(top_summary)
+    summary_lines = top_summary.splitlines()
+    print("\n".join(summary_lines[:17]))
+    if len(summary_lines) > 17:
+        print("Additional models are in the full report.")
     print(f"Report: {args.out}")
     print(f"Total wall time: {time.perf_counter() - started:.2f}s")
     return best_params

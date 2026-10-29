@@ -246,6 +246,12 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
         "prestart",
         "--out",
         str(report_path),
+        "--tune-from",
+        "2022-01-01",
+        "--tune-to",
+        "2023-01-01",
+        "--validate-from",
+        "2023-01-01",
         "--k-grid",
         "16,32",
         "--jobs",
@@ -261,12 +267,12 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     report = report_path.read_text()
     assert "## Holdout" not in report
     assert "Holdout maps=" not in result.stdout
-    assert "## Leaderboard" in report
+    assert "### Leaderboard" in report
     assert "Series blended Δ log loss" in report
     assert "Map blended flat ROI" in report
     assert "Map blended Kelly (LoL caps) $" in report
-    assert report.count("#### Log loss vs Kalshi (blended)") == 3
-    assert report.count("#### Full-Kelly returns (blended)") == 3
+    assert report.count("#### Log loss vs Kalshi (blended)") == 6
+    assert report.count("#### Full-Kelly returns (blended)") == 6
     assert "excluded from blended tables: 2 rows" in report
     assert "| 2023-01 | series | 0 | 1.000000 | 0.000000 | unfitted |" in report
     blended = report.split("#### Log loss vs Kalshi (blended)")[1]
@@ -290,15 +296,15 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     weights = json.loads((tmp_path / "promval/ratings/elo_weights.json").read_text())
     assert set(weights) == {"team_elo", "team_round", "player_binary_region"}
     for name, params in selected.items():
-        assert weights[name] == {**params, "fit_through": "2026-06-30"}
+        assert weights[name] == {**params, "fit_through": "2022-01-01"}
     # Future rows must not affect the tuning leaderboard or chosen parameters.
-    leaderboard = report.split("## Leaderboard")[1].split("Kalshi uses")[0]
+    leaderboard = report.split("### Leaderboard")[1].split("Kalshi uses")[0]
     with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE maps SET score1=13,score2=1 WHERE match_id>=4")
+        conn.execute("UPDATE maps SET score1=13,score2=1 WHERE match_id>=2")
         conn.execute("DROP TABLE kalshi_links")
     assert benchmark.main(args) == selected
     assert (
-        report_path.read_text().split("## Leaderboard")[1].split("Kalshi uses")[0]
+        report_path.read_text().split("### Leaderboard")[1].split("Kalshi uses")[0]
         == leaderboard
     )
     assert "no linked markets" in report_path.read_text()
@@ -325,9 +331,16 @@ def test_empty_windows_and_invalid_selection(database, tmp_path, monkeypatch):
         "32",
     ]
     for extra in (
-        ["--score-from", "2026-07-01"],
+        ["--tune-from", "2026-07-01"],
         ["--k-grid", "nan"],
-        ["--score-from", "2026-06-30T23:30:00"],
+        ["--validate-from", "2026-06-30T23:30:00"],
+        ["--tune-to", "2025-10-01"],
+        ["--validate-from", "2026-07-02"],
+        ["--tune-to", "2023-01-01"],
+        ["--seed-from", "2024-01-01"],
+        ["--validate-from", "NaT"],
+        ["--layers", "missing"],
+        ["--score-from", "2023-01-01"],
         ["--models", "nonexistent"],
         ["--jobs", "0"],
         ["--blend-min", "0"],
@@ -359,7 +372,7 @@ def test_baseline_always_included(database, tmp_path, monkeypatch):
         ]
     )
     assert set(selected) == {"team_elo", "team_round"}
-    assert "| coin | all | 5 |" in (tmp_path / "report.md").read_text()
+    assert "| coin | all | 3 |" in (tmp_path / "report.md").read_text()
 
 
 def test_glicko_report_default_and_explicit_models(
@@ -393,14 +406,13 @@ def test_glicko_report_default_and_explicit_models(
     assert set(selected) == {
         "team_elo",
         "player_round_glicko",
-        "player_round_region_glicko",
     }
     report = out.read_text()
-    assert report.index("## Combined summary") < report.index("## Leaderboard")
-    assert report.count("#### Log loss vs Kalshi\n") == 3
-    assert report.count("#### Full-Kelly returns\n") == 3
+    assert report.index("## Combined summary") < report.index("### Leaderboard")
+    assert report.count("#### Log loss vs Kalshi\n") == 4
+    assert report.count("#### Full-Kelly returns\n") == 4
     assert "| series | vct |" in report and "| map | international=0 |" in report
-    assert "in-sample" in report and "unrounded" in report
+    assert "frozen stage-1" in report and "unrounded" in report
     assert "no depth limit or slippage" in report
     assert "unplayed maps are not in the rows" in report
     printed = capsys.readouterr().out
@@ -408,7 +420,7 @@ def test_glicko_report_default_and_explicit_models(
     assert len(printed.splitlines()) <= 20
     selected = benchmark.main(args + ["--report-models", "team_elo,team_elo"])
     assert set(selected) == {"team_elo"}
-    assert out.read_text().count("#### Full-Kelly returns\n") == 1
+    assert out.read_text().count("#### Full-Kelly returns\n") == 2
     with pytest.raises(SystemExit):
         benchmark.main(args + ["--report-models", "unknown"])
 
@@ -449,7 +461,7 @@ def test_blend_walk_forward_boundaries_kinds_and_exclusion():
                     }
                 )
     frame = pd.DataFrame(records).sample(frac=1, random_state=4)
-    rows, snapshots = walk_forward(frame, min_rows=12)
+    rows, snapshots = walk_forward(frame, "2023-01-01", min_rows=12)
     dates = pd.to_datetime(rows.start_utc, utc=True)
     january = rows[dates.dt.strftime("%Y-%m") == "2023-01"]
     assert not january.blend_fitted.any()
@@ -469,7 +481,7 @@ def test_blend_walk_forward_boundaries_kinds_and_exclusion():
     # Changing same-month/later labels must not change February predictions.
     changed = frame.copy()
     changed.loc[changed.start_utc >= "2023-02", "won"] = 1
-    later, _ = walk_forward(changed, min_rows=12)
+    later, _ = walk_forward(changed, "2023-01-01", min_rows=12)
     february = dates.dt.strftime("%Y-%m") == "2023-02"
     assert (
         rows.loc[february, "p_blend"].tolist()
@@ -533,6 +545,12 @@ def test_end_to_end_fitted_blend(database, tmp_path, monkeypatch):
             "32",
             "--blend-min",
             "1",
+            "--tune-from",
+            "2022-01-01",
+            "--tune-to",
+            "2023-01-01",
+            "--validate-from",
+            "2023-01-01",
         ]
     )
     report = report_path.read_text()
@@ -576,3 +594,162 @@ def test_tradeable_quote_is_first_tight_quote_before_veto_window():
     assert benchmark.candle_quote(candles, start, None, rule) is None
     tight = benchmark.QuoteRule("tradeable", max_spread=0.01)
     assert benchmark.candle_quote(candles, start, opened, tight) is None
+
+
+def test_stage_separation_layers_and_default_market_window(
+    database, tmp_path, monkeypatch
+):
+    from promval.ratings.layers import IdentityLayer, Layer
+
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    fitted, applied, market_sources, market_rows = [], [], [], []
+
+    class Shift(Layer):
+        name = "shift"
+
+        def fit(self, frame):
+            assert self.context["conn"].execute("SELECT 1").fetchone() == (1,)
+            assert self.context["lineups"]
+            assert {
+                "event_id",
+                "match_id",
+                "region",
+                "section",
+                "international",
+                "team1_id",
+                "team2_id",
+            } <= set(frame)
+            fitted.append(frame.copy())
+            logits = np.log(frame.p / (1 - frame.p))
+            self.shift = float(frame.won.mean() - logits.mean())
+
+        def apply(self, frame):
+            applied.append(frame.copy())
+            return 1 / (1 + np.exp(-(np.log(frame.p / (1 - frame.p)) + self.shift)))
+
+    monkeypatch.setitem(benchmark.LAYERS, "shift", Shift)
+    original = benchmark.kalshi_rows
+
+    def capture(conn, maps, series, directory, rule):
+        market_sources.append(maps.copy())
+        result = original(conn, maps, series, directory, rule)
+        market_rows.append(result)
+        return result
+
+    monkeypatch.setattr(benchmark, "kalshi_rows", capture)
+    # Add validation markets alongside the existing tuning-window markets.
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE matches SET best_of=3,winner=1 WHERE match_id=3")
+        for event, kind, game_id in (("S3", "series", None), ("M3", "map", 31)):
+            conn.execute(
+                "INSERT INTO kalshi_links VALUES (?,3,?,?,'exact',NULL)",
+                (event, game_id, kind),
+            )
+            conn.execute(
+                "INSERT INTO kalshi_markets(ticker,series,event_ticker,kind,competitor_id) VALUES (?,?,?,?,?)",
+                (event + "a", "KXVALORANTGAME", event, kind, "a"),
+            )
+            candles = data / "kalshi/candles"
+            (candles / f"{event}a.json.gz").write_bytes(
+                (candles / f"{event[0]}a.json.gz").read_bytes()
+            )
+    out = tmp_path / "layers.md"
+    args = [
+        "--db",
+        str(path),
+        "--out",
+        str(out),
+        "--models",
+        "team_elo",
+        "--report-models",
+        "team_elo",
+        "--layers",
+        "none,shift",
+        "--k-grid",
+        "16,32",
+        "--jobs",
+        "1",
+        "--quote",
+        "prestart",
+        "--holdout",
+    ]
+    selected = benchmark.main(args)
+    assert len(fitted) == len(applied) == 1
+    assert set(fitted[0].match_id) == {2}
+    assert set(applied[0].match_id) == {3, 4, 5}
+    assert all(set(frame.match_id) == {3, 4, 5} for frame in market_sources)
+    assert all(set(frame.match_id) == {3} for frame in market_rows)
+    pd.testing.assert_frame_equal(market_sources[0], market_sources[1])
+    assert not market_sources[0].p.equals(market_sources[2].p)
+    pd.testing.assert_series_equal(IdentityLayer().apply(fitted[0]), fitted[0].p)
+    report = out.read_text()
+    assert "team_elo+shift − team_elo" in report
+    assert "### team_elo+shift: Kalshi comparison and returns" in report
+    assert "## Holdout" in report
+    stage1 = report.split("## Stage 1")[1].split("## Stage 2")[0]
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE maps SET score1=1,score2=13 WHERE match_id>=3")
+    assert benchmark.main(args) == selected
+    assert out.read_text().split("## Stage 1")[1].split("## Stage 2")[0] == stage1
+
+
+def test_monthly_counts_and_identical_rows():
+    frame = pd.DataFrame(
+        [
+            {
+                "kind": kind,
+                "start_utc": f"2025-{month}-02T00:00:00Z",
+                "p": 0.8,
+                "market_p": 0.6,
+                "p_blend": 0.7,
+                "blend_fitted": True,
+                "won": i % 2,
+                "ask": 0.61,
+                "bid": 0.59,
+                "match_id": i,
+            }
+            for i, (kind, month) in enumerate(
+                [("map", "09"), ("map", "09"), ("map", "10"), ("series", "10")]
+            )
+        ]
+    )
+    table = benchmark.monthly_table(frame)
+    parsed = [line.split("|")[1:-1] for line in table.splitlines()[2:]]
+    for kind in ("map", "series"):
+        assert sum(int(row[2]) for row in parsed if row[0].strip() == kind) == sum(
+            frame.kind == kind
+        )
+    september = next(row for row in parsed if row[1].strip() == "2025-09")
+    rows = frame[frame.start_utc.str.startswith("2025-09")]
+    assert float(september[3]) == pytest.approx(benchmark.mean_loss(rows), abs=1e-6)
+    assert float(september[4]) == pytest.approx(
+        game_losses(rows.p_blend, rows.won).log_loss.mean(), abs=1e-6
+    )
+    assert float(september[5]) == pytest.approx(
+        game_losses(rows.market_p, rows.won).log_loss.mean(), abs=1e-6
+    )
+
+
+def test_blend_default_validation_start():
+    frame = pd.DataFrame(
+        [
+            {
+                "start_utc": f"{month}-15T00:00:00Z",
+                "kind": "map",
+                "p": 0.7,
+                "market_p": 0.6,
+                "won": won,
+            }
+            for month, won in (
+                ("2025-08", 0),
+                ("2025-09", 1),
+                ("2025-10", 0),
+                ("2026-07", 1),
+                ("2026-08", 0),
+            )
+        ]
+    )
+    rows, fits = walk_forward(frame, min_rows=1)
+    assert fits.n.tolist() == [0, 0, 1, 2, 2]
+    assert rows.blend_fitted.tolist() == [False, False, True, True, True]
