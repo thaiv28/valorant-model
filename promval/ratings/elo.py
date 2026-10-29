@@ -2,10 +2,12 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from math import exp, isfinite, log, tanh
+from math import exp, isfinite, log, log1p, tanh
 
 from promval.ratings.regions import macro_region
 from promval.ratings.rounds import map_win
+
+TIER_RANKS = {"collegiate": 0, "t3": 1, "vcl": 2, "vct": 3}
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,11 @@ class EloModel:
         rd_floor=140.0,
         rd_growth=10.0,
         rd_info=0.125,
+        rookie_penalty=0.0,
+        rookie_maps=30,
+        move_up_penalty=0.0,
+        move_down_bonus=0.0,
+        move_maps=20,
     ):
         if unit not in {"team", "player"} or credit not in {
             "binary",
@@ -80,6 +87,27 @@ class EloModel:
         self.rd_growth, self.rd_info = rd_growth, rd_info
         self.rd_variance = {}
         self.last_seen = {}
+        if unit == "player" and (
+            not all(
+                isfinite(v)
+                for v in (
+                    rookie_penalty,
+                    rookie_maps,
+                    move_up_penalty,
+                    move_down_bonus,
+                    move_maps,
+                )
+            )
+            or min(rookie_penalty, move_up_penalty, move_down_bonus) < 0
+            or min(rookie_maps, move_maps) <= 0
+        ):
+            raise ValueError("invalid player rookie/move parameters")
+        self.rookie_penalty, self.rookie_maps = rookie_penalty, rookie_maps
+        self.move_up_penalty, self.move_down_bonus = move_up_penalty, move_down_bonus
+        self.move_maps = move_maps
+        self.map_counts = {}
+        self.tier_counts = {}
+        self.tier_homes = {}
         self.unit, self.credit = unit, credit
         self.k, self.c, self.tau = k, c, tau
         self.region_k, self.new_player = region_k, new_player
@@ -102,7 +130,19 @@ class EloModel:
             return starters
         return self.last_lineups.get(team, (("team", team),))
 
-    def _strength(self, units):
+    def _effective_rating(self, player, rank):
+        rating = self.ratings[player]
+        maps = self.map_counts.get(player, 0)
+        if self.rookie_penalty and maps < self.rookie_maps:
+            rating -= self.rookie_penalty * (1 - log1p(maps) / log1p(self.rookie_maps))
+        home = self.tier_homes.get(player)
+        if rank is not None and home is not None and rank != home:
+            played = self.tier_counts.get(player, {}).get(rank, 0)
+            adjustment = -self.move_up_penalty if rank > home else self.move_down_bonus
+            rating += adjustment * max(0.0, 1 - played / self.move_maps)
+        return rating
+
+    def _strength(self, units, rank=None):
         known = [self.ratings[p] for p in units if p in self.ratings]
         initial = (
             sum(known) / len(known)
@@ -111,12 +151,17 @@ class EloModel:
         )
         for player in units:
             self.ratings.setdefault(player, initial)
+        if self.unit == "player" and (
+            self.rookie_penalty or self.move_up_penalty or self.move_down_bonus
+        ):
+            return sum(self._effective_rating(p, rank) for p in units) / len(units)
         return sum(self.ratings[p] for p in units) / len(units)
 
     def _state(self, row):
         a, b = self._units(row, 1), self._units(row, 2)
         home_a, home_b = self.homes.get(row.team1_id), self.homes.get(row.team2_id)
-        strength_a, strength_b = self._strength(a), self._strength(b)
+        rank = TIER_RANKS.get(getattr(row, "section", None))
+        strength_a, strength_b = self._strength(a, rank), self._strength(b, rank)
         if self.region_k:
             strength_a += self.offsets.get(home_a, 0)
             strength_b += self.offsets.get(home_b, 0)
@@ -192,6 +237,18 @@ class EloModel:
             team = getattr(row, f"team{side}_id")
             if self.unit == "player":
                 self.last_lineups[team] = units
+                for player in units:
+                    if self.rookie_penalty:
+                        self.map_counts[player] = self.map_counts.get(player, 0) + 1
+                    rank = TIER_RANKS.get(getattr(row, "section", None))
+                    if (
+                        self.move_up_penalty or self.move_down_bonus
+                    ) and rank is not None:
+                        counts = self.tier_counts.setdefault(player, {})
+                        counts[rank] = counts.get(rank, 0) + 1
+                        previous = self.tier_homes.get(player)
+                        if counts[rank] > counts.get(previous, 0):
+                            self.tier_homes[player] = rank
             if (
                 self.region_k
                 and region is not None

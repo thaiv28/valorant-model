@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Rookie discount and tier moves
+
+Branch `rookie-moves`, base `main`. Added optional player-only logarithmic rookie discounts and linearly fading tier-move adjustments to prediction/update strengths, with update-only map counts and majority tier homes. Registered three narrowed-grid Glicko variants; existing defaults retain exact predictions. Tests cover decay, promotions/demotions, ties, excluded sections, update expectations, leakage and registry grids. Checks: offline `uv run --no-sync pytest -q` (221 passed, 14.40 s; baseline 198 in 21.52 s), `ruff format --check`, `ruff check`, and `git diff --check` passed. Plain `uv run` panicked locally; used the existing environment with `--no-sync`. Limits: not yet benchmarked; no holdout tuning or network access.
+
 ## 2026-10-28 — Parallel VLR crawl
 
 Branch `crawl-workers`, base `main`. `promval vlr crawl --workers N` fetches each results page's missing match and economy pages in N threads. The fetcher is thread-safe: one shared request slot per `--min-interval` (the total rate cap), and a 429/5xx pauses every worker for the backoff, not only the one that hit it. Default stays 1 worker. Checks: pytest, ruff.

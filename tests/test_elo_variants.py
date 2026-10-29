@@ -152,13 +152,13 @@ def test_region_offsets_only_cross_region_and_zero_sum():
 
 
 def test_registry_grids_and_v1_regression():
-    assert len(MODELS) == len(PARAM_GRIDS) == 15
+    assert len(MODELS) == len(PARAM_GRIDS) == 18
     assert "team_binary" not in MODELS
     for name in MODELS:
         if name == "coin":
             continue
         grid = PARAM_GRIDS[name]
-        if name.endswith("_glicko"):
+        if "_glicko" in name:
             continue
         assert grid["k"] == (16, 24, 32, 48, 64, 96)
         assert ("region_k" in grid) == name.endswith("_region")
@@ -307,3 +307,187 @@ def test_glicko_registry_and_exact_grids():
         assert model.rd_floor == 140 and model.rd_growth == 10
         assert model.predict(row()) == 0.5
         assert model.rd_variance == model.last_seen == {}
+
+
+@pytest.mark.parametrize("maps", [0, 1, 10, 29, 30, 40])
+def test_rookie_log_discount_and_update_only_counts(maps):
+    from math import log1p
+
+    model = EloModel(
+        unit="player", rookie_penalty=100, rookie_maps=30, lineups={1: ((1,), (2,))}
+    )
+    for _ in range(maps):
+        model.update(row())
+    model.ratings = {1: 1600, 2: 1500}
+    before = model.ratings.copy()
+    discount = 100 * (1 - log1p(maps) / log1p(30)) if maps < 30 else 0
+    assert model._strength((1,)) == pytest.approx(1600 - discount)
+    for _ in range(2):
+        model.predict(row())
+    assert model.ratings == before
+    assert model.map_counts == ({1: maps, 2: maps} if maps else {})
+    model.update(row())
+    assert model.map_counts == {1: maps + 1, 2: maps + 1}
+
+
+@pytest.mark.parametrize("credit", ["binary", "round"])
+def test_adjusted_strengths_drive_update_expectation(credit):
+    model = EloModel(
+        unit="player",
+        credit=credit,
+        rookie_penalty=100,
+        move_up_penalty=80,
+        lineups={1: ((1,), (2,))},
+    )
+    model.ratings = {1: 1600, 2: 1500}
+    model.map_counts = {1: 30}
+    model.tier_homes = {1: 2, 2: 3}
+    model.tier_counts = {1: {2: 5}, 2: {3: 5}}
+    game = row(section="vct")
+    # Side 1 is promoted (1600 - 80); side 2 is a rookie (1500 - 100).
+    expected = 1 / (1 + 10 ** ((1400 - 1520) / 400))
+    assert model._state(game)[-1] == pytest.approx(expected)
+    before = model.ratings.copy()
+    model.predict(game)
+    assert model.ratings == before
+    model.update(game)
+    assert model.ratings[1] == pytest.approx(1600 + 32 * (model.score(game) - expected))
+    assert model.ratings[2] == pytest.approx(1500 - 32 * (model.score(game) - expected))
+
+
+@pytest.mark.parametrize(
+    "home,target,adjustment", [("vcl", "vct", -100), ("vct", "vcl", 50)]
+)
+def test_tier_moves_fade_with_prior_rank_count(home, target, adjustment):
+    model = EloModel(
+        unit="player",
+        move_up_penalty=100,
+        move_down_bonus=50,
+        move_maps=4,
+        lineups={1: ((1,), (2,))},
+    )
+    for _ in range(10):
+        model.update(row(section=home))
+    for played in range(6):
+        model.ratings = {1: 1500, 2: 1500}
+        counts = {p: c.copy() for p, c in model.tier_counts.items()}
+        homes = model.tier_homes.copy()
+        game = row(section=target)
+        model.predict(game)
+        model.predict(game)
+        rank = 3 if target == "vct" else 2
+        assert model._strength((1,), rank) == 1500 + adjustment * max(0, 1 - played / 4)
+        assert model.ratings == {1: 1500, 2: 1500}
+        assert model.tier_counts == counts and model.tier_homes == homes
+        model.update(game)
+
+
+def test_tier_home_majority_ties_and_unranked_maps():
+    model = EloModel(
+        unit="player",
+        move_up_penalty=100,
+        move_down_bonus=50,
+        lineups={1: ((1,), (2,))},
+    )
+    model.predict(row(section="vct"))
+    assert model.tier_homes == model.tier_counts == {}
+    for section, home in [
+        ("collegiate", 0),
+        ("t3", 0),
+        ("t3", 1),
+        ("vcl", 1),
+        ("vct", 1),
+        ("vct", 1),
+        ("vct", 3),
+    ]:
+        model.update(row(section=section))
+        assert model.tier_homes == {1: home, 2: home}
+    counts = {p: c.copy() for p, c in model.tier_counts.items()}
+    for section in ("gc", "offseason", "unknown", None):
+        model.ratings = {1: 1600, 2: 1500}
+        assert model.predict(row(section=section)) == 1 / (1 + 10 ** (-100 / 400))
+        model.update(row(section=section))
+        assert model.tier_counts == counts
+        assert model.tier_homes == {1: 3, 2: 3}
+
+
+def test_default_glicko_exact_pre_adjustment_predictions():
+    model = MODELS["player_round_glicko"](
+        k=48,
+        tau=0.5,
+        new_player="teammates",
+        lineups={1: ((1, 2), (3, 4)), 2: ((1, 5), (3, 6)), 3: ((2, 5), (4, 6))},
+    )
+    # Captured from HEAD's original EloModel, before adding either adjustment.
+    expected = [
+        0.5,
+        0.6049514936541424,
+        0.4895232774269876,
+        0.5494500189842346,
+        0.34805927231445377,
+        0.5873668334641886,
+        0.36348696685987575,
+        0.4842849065470713,
+        0.41388964763129493,
+    ]
+    for i, probability in enumerate(expected):
+        game = row(
+            game_id=i % 3 + 1,
+            score1=13 if i % 2 == 0 else 7,
+            score2=9 if i % 2 == 0 else 13,
+            won=int(i % 2 == 0),
+            start_utc=f"2026-01-{i + 1:02d}T12:00:00Z",
+            section=("vcl", "vct", "gc")[i % 3],
+        )
+        assert model.predict(game) == probability
+        model.update(game)
+    assert model.map_counts == model.tier_counts == model.tier_homes == {}
+
+
+@pytest.mark.parametrize("variant", ["rookie", "moves", "rookie_moves"])
+def test_rookie_moves_registry_exact_grids(variant):
+    name = f"player_round_glicko_{variant}"
+    grid = {
+        "k": (32, 48),
+        "tau": (0.4, 0.5),
+        "rd_new": (280, 350),
+        "rd_info": (0.25,),
+        "new_player": ("teammates",),
+    }
+    if "rookie" in variant:
+        grid.update(rookie_penalty=(50, 100, 200), rookie_maps=(30, 100))
+    if "moves" in variant:
+        grid.update(move_up_penalty=(50, 100, 200), move_down_bonus=(0, 50))
+    assert PARAM_GRIDS[name] == grid
+    model = MODELS[name](**{p: values[0] for p, values in grid.items()})
+    assert model.unit == "player" and model.credit == "round" and model.rd
+    assert model.move_maps == 20
+    assert model.predict(row()) == 0.5
+
+
+def test_teams_ignore_player_adjustments():
+    original = EloModel()
+    adjusted = EloModel(rookie_penalty=200, move_up_penalty=100, move_down_bonus=50)
+    for game in (row(section="vcl"), row(section="vct"), row(section="collegiate")):
+        assert original.predict(game) == adjusted.predict(game)
+        original.update(game)
+        adjusted.update(game)
+        assert original.ratings == adjusted.ratings
+    assert adjusted.map_counts == adjusted.tier_counts == adjusted.tier_homes == {}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"rookie_penalty": -1},
+        {"rookie_maps": 0},
+        {"move_up_penalty": -1},
+        {"move_down_bonus": -1},
+        {"move_maps": 0},
+        {"rookie_maps": float("nan")},
+        {"move_up_penalty": float("inf")},
+    ],
+)
+def test_invalid_player_adjustment_parameters(options):
+    with pytest.raises(ValueError, match="rookie/move"):
+        EloModel(unit="player", **options)
