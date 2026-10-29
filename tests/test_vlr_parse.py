@@ -220,3 +220,16 @@ def test_full_regulation_header_and_optional_fields():
     match = parse_match(str(soup), 163803)
     assert len(match.maps[0].rounds) == 24
     assert match.best_of is None and match.patch is None
+
+
+def test_map_order_follows_tabs_not_sections():
+    """730547: the stat sections list Lotus, Breeze, Ascent, but the tabs (and
+    the veto: DFM pick Ascent, QTD pick Lotus, Breeze remains) give the play
+    order, which Kalshi's map markets settled on."""
+    html = load(FIXTURES / "regress_730547.html.gz")
+    match = parse_match(html, 730547)
+    assert [(m.order, m.map, m.score1, m.score2) for m in match.maps] == [
+        (1, "Ascent", 13, 9),
+        (2, "Lotus", 12, 14),
+        (3, "Breeze", 13, 7),
+    ]

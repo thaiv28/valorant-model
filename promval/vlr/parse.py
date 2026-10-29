@@ -297,12 +297,21 @@ def parse_match(html: str, match_id: int) -> Match:
                 veto.append(VetoStep(len(veto) + 1, None, "decider", decider[1]))
             else:
                 raise ParseError(match_id, f"unrecognized veto: {part}")
-        maps = []
-        for game in soup.select(".vm-stats-game[data-game-id]"):
-            if game["data-game-id"] != "all" and game.select_one(
-                ".vm-stats-game-header"
-            ):
-                maps.append(_map(game, len(maps) + 1, match_id))
+        # Play order comes from the numbered map tabs ("1 Ascent"); the stat
+        # sections below them can be in a different order.
+        tab_order = {}
+        for tab in soup.select(".vm-stats-gamesnav-item[data-game-id]"):
+            number = re.match(r"\s*(\d+)\b", _text(tab))
+            if number:
+                tab_order[tab["data-game-id"]] = int(number[1])
+        games = [
+            game
+            for game in soup.select(".vm-stats-game[data-game-id]")
+            if game["data-game-id"] != "all"
+            and game.select_one(".vm-stats-game-header")
+        ]
+        games.sort(key=lambda g: tab_order.get(g["data-game-id"], 99))
+        maps = [_map(game, i, match_id) for i, game in enumerate(games, 1)]
         wins = [sum((m.score1 > m.score2) == (t == 1) for m in maps) for t in (1, 2)]
         if wins != scores:
             raise ParseError(match_id, f"series score {scores} != map wins {wins}")
