@@ -18,6 +18,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from promval.backtest import summarize
 from promval.evaluation import (
     HOLDOUT_START,
     ece,
@@ -31,7 +32,7 @@ from promval.ratings.regions import macro_region
 from promval.ratings.replay import load_lineups, load_maps, replay
 
 
-def candle_mid(candles, start_utc):
+def candle_quote(candles, start_utc):
     """Last valid bid/ask close at or before match start, in dollar units."""
     if isinstance(candles, dict):
         candles = candles.get("candlesticks", [])
@@ -55,8 +56,13 @@ def candle_mid(candles, start_utc):
                 break
             closes.append(value)
         if len(closes) == 2:
-            valid.append((end, sum(closes) / 2))
+            valid.append((end, tuple(closes)))
     return max(valid, key=lambda item: item[0])[1] if valid else None
+
+
+def candle_mid(candles, start_utc):
+    quote = candle_quote(candles, start_utc)
+    return sum(quote) / 2 if quote is not None else None
 
 
 def series_rows(maps):
@@ -106,9 +112,11 @@ def kalshi_rows(conn, maps, series, directory):
         if not path.exists():
             continue
         with gzip.open(path, "rt") as handle:
-            mid = candle_mid(json.load(handle), row.start_utc)
-        if mid is None:
+            quote = candle_quote(json.load(handle), row.start_utc)
+        if quote is None:
             continue
+        bid, ask = quote
+        mid = (bid + ask) / 2
         team1 = market.vlr_team_id == row.team1_id
         candidate = row.to_dict()
         if market.kind == "map":
@@ -119,6 +127,8 @@ def kalshi_rows(conn, maps, series, directory):
             event_ticker=market.event_ticker,
             market_p=mid if team1 else 1 - mid,
             team1_side=team1,
+            ask=ask if team1 else 1 - bid,
+            bid=bid if team1 else 1 - ask,
         )
         candidates.append(candidate)
     if not candidates:
@@ -135,7 +145,7 @@ def sections(frame):
     yield "all", frame
     for name in ("vct", "vcl", "gc", "t3", "collegiate", "offseason", "unknown"):
         yield name, frame[frame.section == name]
-    for flag in (0, 1):
+    for flag in (1, 0):
         yield f"international={flag}", frame[frame.international == flag]
 
 
@@ -178,6 +188,91 @@ def comparison_table(frame, other, label, model="team_elo", by_section=True):
     return "\n".join(lines)
 
 
+def market_slices(frame):
+    for kind in ("series", "map"):
+        subset = frame[frame.kind == kind] if not frame.empty else frame
+        yield kind, "all", subset
+        for section in ("vct", "vcl", "gc", "t3", "collegiate", "offseason"):
+            yield (
+                kind,
+                section,
+                subset[subset.section == section] if not subset.empty else subset,
+            )
+        for flag in (1, 0):
+            yield (
+                kind,
+                f"international={flag}",
+                subset[subset.international == flag] if not subset.empty else subset,
+            )
+
+
+def market_tables(frame):
+    loss_lines = [
+        "| Kind | Slice | Rows | Model log loss | Kalshi log loss | Difference [95% interval] | Significant |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    bet_lines = [
+        "| Kind | Slice | Bets | Matches | Mean edge | Flat ROI [95% interval] | Kelly final ($50 start) | Multiple | Max drawdown | Largest stake |",
+        "|---|---|---:|---:|---:|---|---:|---:|---:|---:|",
+    ]
+    for kind, label, rows in market_slices(frame):
+        if rows.empty:
+            loss_lines.append(f"| {kind} | {label} | 0 | — | — | — | — |")
+        else:
+            model_loss = game_losses(rows.p, rows.won).log_loss
+            market_loss = game_losses(rows.market_p, rows.won).log_loss
+            diff, low, high = paired_bootstrap(
+                model_loss, market_loss, clusters=rows.match_id
+            )
+            significant = "yes" if low > 0 or high < 0 else "no"
+            loss_lines.append(
+                f"| {kind} | {label} | {len(rows)} | {model_loss.mean():.6f} | "
+                f"{market_loss.mean():.6f} | {diff:.6f} [{low:.6f}, {high:.6f}] | {significant} |"
+            )
+        stats = summarize(rows)
+        edge = f"{stats['mean_edge']:.4f}" if stats["bets"] else "—"
+        roi = (
+            f"{stats['flat_roi']:.2%} [{stats['roi_low']:.2%}, {stats['roi_high']:.2%}]"
+            if stats["bets"]
+            else "—"
+        )
+        bet_lines.append(
+            f"| {kind} | {label} | {stats['bets']} | {stats['matches']} | {edge} | {roi} | "
+            f"${stats['bankroll']:.2f} | {stats['multiple']:.3f}× | "
+            f"{stats['max_drawdown']:.2%} | ${stats['largest_stake']:.2f} |"
+        )
+    return "\n".join(loss_lines), "\n".join(bet_lines)
+
+
+def summary_table(markets):
+    lines = [
+        "| Model | Series Δ log loss | Series flat ROI | Series Kelly $ | Map Δ log loss | Map flat ROI | Map Kelly $ |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for name, frame in markets.items():
+        cells = [name]
+        for kind in ("series", "map"):
+            rows = frame[frame.kind == kind] if not frame.empty else frame
+            stats = summarize(rows)
+            diff = (
+                (
+                    game_losses(rows.p, rows.won).log_loss.mean()
+                    - game_losses(rows.market_p, rows.won).log_loss.mean()
+                )
+                if not rows.empty
+                else None
+            )
+            cells.extend(
+                [
+                    f"{diff:.6f}" if diff is not None else "—",
+                    f"{stats['flat_roi']:.2%}" if stats["bets"] else "—",
+                    f"${stats['bankroll']:.2f}",
+                ]
+            )
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def scored_rows(frame, score_from, holdout=False):
     """Scoring windows never overlap; rating warmup is handled by replay."""
     dates = pd.to_datetime(frame.start_utc, utc=True)
@@ -216,6 +311,10 @@ def main(argv=None):
     parser.add_argument("--db", type=Path, default=Path("db/valorant.db"))
     parser.add_argument("--out", type=Path, default=Path("docs/elo_backtest.md"))
     parser.add_argument("--models", default=",".join(n for n in MODELS if n != "coin"))
+    parser.add_argument(
+        "--report-models",
+        help="comma list; default team_elo, best three, both Glicko variants",
+    )
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument("--k-grid", help="optional K grid override for every model")
     parser.add_argument("--score-from", default="2023-01-01")
@@ -242,7 +341,23 @@ def main(argv=None):
     requested = [name.strip() for name in args.models.split(",")]
     if any(name not in MODELS for name in requested):
         parser.error("unknown model in --models")
-    names = list(dict.fromkeys(["team_elo", *(n for n in requested if n != "coin")]))
+    report_names = (
+        None
+        if args.report_models is None
+        else list(dict.fromkeys(name.strip() for name in args.report_models.split(",")))
+    )
+    if report_names is not None and any(
+        name not in MODELS or name == "coin" for name in report_names
+    ):
+        parser.error("unknown rating model in --report-models")
+    extras = (
+        report_names
+        if report_names is not None
+        else ["player_round_glicko", "player_round_region_glicko"]
+    )
+    names = list(
+        dict.fromkeys(["team_elo", *(n for n in requested if n != "coin"), *extras])
+    )
     if not args.db.is_file():
         parser.error(f"database does not exist: {args.db}")
     with sqlite3.connect(args.db) as conn:
@@ -272,7 +387,20 @@ def main(argv=None):
                     if name not in losses or loss < losses[name]:
                         best_params[name], losses[name] = params, loss
         ranked = sorted(names, key=losses.get)
-        detailed = ["team_elo", *[name for name in ranked if name != "team_elo"][:3]]
+        detailed = (
+            report_names
+            if report_names is not None
+            else list(
+                dict.fromkeys(
+                    [
+                        "team_elo",
+                        *ranked[:3],
+                        "player_round_glicko",
+                        "player_round_region_glicko",
+                    ]
+                )
+            )
+        )
         winners = {
             name: replay(maps, MODELS[name](lineups=lineups, **best_params[name]))
             for name in names
@@ -305,7 +433,15 @@ def main(argv=None):
             "Kalshi uses the last valid hourly bid/ask midpoint ending at or before match start, "
             "oriented to team1 using aliases. One contract per event, preferring team1. "
             "Compare identical rows; map predictions use the first map's pre-match chance. "
-            "Missing links, aliases or candles are skipped; fees and execution are excluded.",
+            "Missing links, aliases or candles are skipped. Backtests are in-sample on the tuning window "
+            "(parameters were selected there). Fills are assumed at the hourly candle’s ask/bid with "
+            "no depth limit or slippage; unplayed maps are not in the rows. "
+            "Kalshi taker fees use unrounded f(c)=0.07×c×(1−c) per contract. Buy the larger positive "
+            "after-fee edge, otherwise skip; require a two-sided quote with both buy costs in (0,1). "
+            "Full Kelly uses fraction (q−c′)/(1−c′), c′=c+f(c). All bets in a match use its starting "
+            "bankroll, scaling fractions to sum to at most one, then settle together. Each kind/slice "
+            "runs its own $50 path. Drawdown uses settled match balances. Flat stakes are $1 all-in "
+            "per bet; ROI intervals resample whole matches 2,000 times, seed 0.",
         ]
         windows = [("Tuning", False)]
         if args.holdout:
@@ -347,17 +483,30 @@ def main(argv=None):
                             frame, "baseline_p", "team_elo", name, by_section=False
                         )
                     )
-            for name in detailed:
-                frame = selected[name]
-                market = kalshi_rows(conn, frame, series_rows(frame), data_dir())
-                for kind in ("series", "map"):
-                    report.append(f"### Kalshi {kind}: {name}")
-                    subset = market[market.kind == kind] if not market.empty else market
-                    report.append(
-                        "no linked markets (rows: 0)"
-                        if subset.empty
-                        else comparison_table(subset, "market_p", "Kalshi", name)
-                    )
+            markets = {
+                name: kalshi_rows(
+                    conn, selected[name], series_rows(selected[name]), data_dir()
+                )
+                for name in detailed
+            }
+            if not holdout:
+                top_summary = summary_table(markets)
+                report.insert(
+                    1, "## Combined summary (tuning, all sections)\n\n" + top_summary
+                )
+            for name, market in markets.items():
+                report.append(f"### {name}: Kalshi comparison and returns")
+                if market.empty:
+                    report.append("no linked markets (rows: 0)")
+                loss_table, bet_table = market_tables(market)
+                report.extend(
+                    [
+                        "#### Log loss vs Kalshi",
+                        loss_table,
+                        "#### Full-Kelly returns",
+                        bet_table,
+                    ]
+                )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n\n".join(report) + "\n")
     if args.write_weights:
@@ -372,13 +521,7 @@ def main(argv=None):
             )
             + "\n"
         )
-    for name in ranked:
-        print(
-            f"{name}: {json.dumps(best_params[name], sort_keys=True)}; tuning map log loss={losses[name]:.6f}"
-        )
-    print(
-        f"Tuning maps={len(tuning_maps)}; fit through {fit_through}; unknown region rows={unknown}"
-    )
+    print(top_summary)
     print(f"Report: {args.out}")
     print(f"Total wall time: {time.perf_counter() - started:.2f}s")
     return best_params

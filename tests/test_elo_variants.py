@@ -12,6 +12,7 @@ from promval.ratings.rounds import map_win
 
 def row(**kwargs):
     values = {
+        "start_utc": "2026-01-01T12:00:00Z",
         "game_id": 1,
         "team1_id": 10,
         "team2_id": 20,
@@ -151,12 +152,14 @@ def test_region_offsets_only_cross_region_and_zero_sum():
 
 
 def test_registry_grids_and_v1_regression():
-    assert len(MODELS) == len(PARAM_GRIDS) == 13
+    assert len(MODELS) == len(PARAM_GRIDS) == 15
     assert "team_binary" not in MODELS
     for name in MODELS:
         if name == "coin":
             continue
         grid = PARAM_GRIDS[name]
+        if name.endswith("_glicko"):
+            continue
         assert grid["k"] == (16, 24, 32, 48, 64, 96)
         assert ("region_k" in grid) == name.endswith("_region")
         assert ("new_player" in grid) == name.startswith("player")
@@ -184,3 +187,123 @@ def test_registry_grids_and_v1_regression():
         ],
         abs=1e-9,
     )
+
+
+@pytest.mark.parametrize("credit", ["binary", "margin", "round"])
+def test_rd_first_move_and_update_expectation(credit):
+    from math import log
+
+    lineups = {1: ((1, 2), (3, 4))}
+    base = EloModel(unit="player", credit=credit, k=12, lineups=lineups)
+    model = EloModel(unit="player", credit=credit, k=12, lineups=lineups, rd=True)
+    # Unequal strengths distinguish map-win prediction from round expectation.
+    for candidate in (base, model):
+        candidate.ratings.update({1: 1510, 2: 1510, 3: 1490, 4: 1490})
+    expected = base._state(row())[-1]
+    before = model.ratings.copy()
+    base.update(row())
+    model.update(row())
+    for player in (1, 2, 3, 4):
+        assert model.ratings[player] - before[player] == pytest.approx(
+            4 * (base.ratings[player] - before[player])
+        )
+    information = 0.125 * (log(10) / 400) ** 2 * expected * (1 - expected)
+    assert model.rd_variance[1] == pytest.approx(1 / (1 / 280**2 + information))
+    assert model.rd_variance[1] < 280**2
+
+
+def test_rd_growth_cap_floor_and_prediction_has_no_leakage():
+    from math import log
+
+    model = EloModel(unit="player", rd=True, k=12, lineups={1: ((1,), (2,))})
+    model.update(row())
+    first_variance = model.rd_variance.copy()
+    first_seen = model.last_seen.copy()
+    # Repeated and future predictions must not age/shrink RD or save dates.
+    future = row(start_utc="2026-01-04T00:00:00Z")
+    model.predict(future)
+    model.predict(future)
+    assert model.rd_variance == first_variance
+    assert model.last_seen == first_seen
+    model.ratings = {1: 1500, 2: 1500}
+    aged = first_variance[1] + 10**2 * 2.5
+    model.update(future)
+    assert model.ratings[1] - 1500 == pytest.approx(6 * aged / 140**2)
+    information = 0.125 * (log(10) / 400) ** 2 * 0.25
+    assert model.rd_variance[1] == pytest.approx(1 / (1 / aged + information))
+    assert model.last_seen[1].isoformat() == "2026-01-04T00:00:00+00:00"
+    model.ratings = {1: 1500, 2: 1500}
+    model.update(row(start_utc="2030-01-01T00:00:00Z"))
+    assert model.ratings[1] == pytest.approx(1524)  # Growth capped at new RD.
+    for _ in range(1000):
+        model.ratings = {1: 1500, 2: 1500}
+        model.update(row(start_utc="2030-01-01T00:00:00Z"))
+    assert model.rd_variance == {1: 140**2, 2: 140**2}
+
+
+@pytest.mark.parametrize("credit", ["binary", "margin", "round"])
+@pytest.mark.parametrize("region_k", [0, 4])
+def test_rd_disabled_preserves_existing_player_variants(credit, region_k):
+    options = {
+        "unit": "player",
+        "credit": credit,
+        "region_k": region_k,
+        "lineups": {1: ((1, 2), (3, 4)), 2: ((1, 5), (6, 7))},
+    }
+    original = EloModel(**options)
+    disabled = EloModel(**options, rd=False, rd_new=350, rd_info=0.25)
+    games = [
+        row(region="us"),
+        row(game_id=2, team1_id=30, team2_id=40, region="kr"),
+        row(team2_id=30, international=1, region="cn"),
+        row(game_id=2, score1=4, score2=13, won=0),
+    ]
+    for game in games:
+        assert original.predict(game) == disabled.predict(game)
+        original.update(game)
+        disabled.update(game)
+        assert original.ratings == disabled.ratings
+        assert original.offsets == disabled.offsets
+    assert disabled.rd_variance == disabled.last_seen == {}
+
+
+def test_team_ignores_rd_and_player_validates_parameters():
+    original = EloModel()
+    ignored = EloModel(rd=True, rd_new=-1, rd_info=-1)
+    for game in [row(), row(won=0), row(team2_id=30)]:
+        assert original.predict(game) == ignored.predict(game)
+        original.update(game)
+        ignored.update(game)
+        assert original.ratings == ignored.ratings
+    assert ignored.rd_variance == ignored.last_seen == {}
+    for invalid in (
+        {"rd_floor": 0},
+        {"rd_new": 100},
+        {"rd_info": 0},
+        {"rd_growth": -1},
+        {"rd_info": float("inf")},
+        {"rd_new": float("nan")},
+    ):
+        with pytest.raises(ValueError, match="RD"):
+            EloModel(unit="player", rd=True, **invalid)
+
+
+def test_glicko_registry_and_exact_grids():
+    for region in (False, True):
+        name = "player_round" + ("_region" if region else "") + "_glicko"
+        grid = {
+            "k": (8, 12, 16, 24, 32, 48),
+            "tau": (0.4, 0.5, 0.6, 0.8),
+            "rd_new": (200, 280, 350),
+            "rd_info": (0.0625, 0.125, 0.25),
+            "new_player": ("fixed", "teammates"),
+        }
+        if region:
+            grid["region_k"] = (2, 4, 8)
+        assert PARAM_GRIDS[name] == grid
+        model = MODELS[name]()
+        assert model.unit == "player" and model.credit == "round" and model.rd
+        assert bool(model.region_k) == region
+        assert model.rd_floor == 140 and model.rd_growth == 10
+        assert model.predict(row()) == 0.5
+        assert model.rd_variance == model.last_seen == {}

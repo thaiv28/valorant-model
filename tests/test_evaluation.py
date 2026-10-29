@@ -213,6 +213,8 @@ def test_load_series_and_market_pairing(database):
         market = benchmark.kalshi_rows(conn, maps, series, data / "kalshi")
         assert len(market) == 2
         assert market.market_p.tolist() == pytest.approx([0.7, 0.7])
+        assert market.ask.tolist() == pytest.approx([0.71, 0.71])
+        assert market.bid.tolist() == pytest.approx([0.69, 0.69])
         map_row = market[market.kind == "map"].iloc[0]
         # Map markets are compared with the pre-match chance (first map of match 2).
         assert map_row.p == maps[maps.game_id == 21].p.iloc[0]
@@ -220,6 +222,8 @@ def test_load_series_and_market_pairing(database):
         (data / "kalshi/candles/Ma.json.gz").unlink()
         market = benchmark.kalshi_rows(conn, maps, series, data / "kalshi")
         assert market[market.kind == "map"].market_p.iloc[0] == pytest.approx(0.6)
+        assert market[market.kind == "map"].ask.iloc[0] == pytest.approx(0.61)
+        assert market[market.kind == "map"].bid.iloc[0] == pytest.approx(0.59)
         for candle in (data / "kalshi/candles").glob("*.json.gz"):
             candle.unlink()
         assert benchmark.kalshi_rows(conn, maps, series, data / "kalshi").empty
@@ -244,6 +248,8 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
         "2",
         "--models",
         "team_elo,team_round,player_binary_region",
+        "--report-models",
+        "team_elo,team_round,player_binary_region",
     ]
     result = subprocess.run(
         command, env=env, text=True, capture_output=True, check=True
@@ -256,8 +262,7 @@ def test_end_to_end_variants_and_weights(database, tmp_path, monkeypatch):
     assert "| team_elo | all | 1 |" in report
     for name in ("team_elo", "team_round", "player_binary_region"):
         assert f"| {name} |" in report
-        assert f"### Kalshi series: {name}" in report
-        assert f"### Kalshi map: {name}" in report
+        assert f"### {name}: Kalshi comparison and returns" in report
     assert "team_round − team_elo (paired log loss)" in report
     assert "player_binary_region − team_elo (paired log loss)" in report
     assert "Unknown host-region map rows: 6" in report
@@ -327,6 +332,8 @@ def test_baseline_always_included(database, tmp_path, monkeypatch):
             str(tmp_path / "report.md"),
             "--models",
             "team_round",
+            "--report-models",
+            "team_elo,team_round",
             "--jobs",
             "1",
             "--k-grid",
@@ -335,3 +342,52 @@ def test_baseline_always_included(database, tmp_path, monkeypatch):
     )
     assert set(selected) == {"team_elo", "team_round"}
     assert "| coin | all | 5 |" in (tmp_path / "report.md").read_text()
+
+
+def test_glicko_report_default_and_explicit_models(
+    database, tmp_path, monkeypatch, capsys
+):
+    path, data = database
+    monkeypatch.setenv("PROMVAL_DATA", str(data))
+    # Exercise actual registry factories with a small grid in the synthetic DB.
+    for name in ("player_round_glicko", "player_round_region_glicko"):
+        monkeypatch.setitem(
+            benchmark.PARAM_GRIDS,
+            name,
+            {key: (values[0],) for key, values in benchmark.PARAM_GRIDS[name].items()},
+        )
+    out = tmp_path / "glicko.md"
+    args = [
+        "--db",
+        str(path),
+        "--out",
+        str(out),
+        "--models",
+        "team_elo",
+        "--jobs",
+        "1",
+        "--k-grid",
+        "12",
+    ]
+    selected = benchmark.main(args)
+    assert set(selected) == {
+        "team_elo",
+        "player_round_glicko",
+        "player_round_region_glicko",
+    }
+    report = out.read_text()
+    assert report.index("## Combined summary") < report.index("## Leaderboard")
+    assert report.count("#### Log loss vs Kalshi") == 3
+    assert report.count("#### Full-Kelly returns") == 3
+    assert "| series | vct |" in report and "| map | international=0 |" in report
+    assert "in-sample" in report and "unrounded" in report
+    assert "no depth limit or slippage" in report
+    assert "unplayed maps are not in the rows" in report
+    printed = capsys.readouterr().out
+    assert "Series flat ROI" in printed and "Map Kelly $" in printed
+    assert len(printed.splitlines()) <= 20
+    selected = benchmark.main(args + ["--report-models", "team_elo,team_elo"])
+    assert set(selected) == {"team_elo"}
+    assert out.read_text().count("#### Full-Kelly returns") == 1
+    with pytest.raises(SystemExit):
+        benchmark.main(args + ["--report-models", "unknown"])

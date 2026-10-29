@@ -45,3 +45,18 @@ for unit in ("team", "player"):
             if unit == "player":
                 grid["new_player"] = ("fixed", "teammates")
             PARAM_GRIDS[name] = grid
+
+for region in (False, True):
+    name = "player_round" + ("_region" if region else "") + "_glicko"
+    MODELS[name] = partial(
+        EloModel, unit="player", credit="round", rd=True, region_k=4 if region else 0
+    )
+    PARAM_GRIDS[name] = {
+        "k": (8, 12, 16, 24, 32, 48),
+        "tau": (0.4, 0.5, 0.6, 0.8),
+        "rd_new": (200, 280, 350),
+        "rd_info": (0.0625, 0.125, 0.25),
+        "new_player": ("fixed", "teammates"),
+    }
+    if region:
+        PARAM_GRIDS[name]["region_k"] = (2, 4, 8)
