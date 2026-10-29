@@ -2,6 +2,10 @@
 
 Newest first. Each entry: what changed, the checks run, remaining limits. At most 150 words.
 
+## 2026-10-28 — Regional calibration and form layers
+
+Branch `layers`, base `main`. Added ridge-shrunk zero-sum regional calibration, player-rating recent form with stage-1 half-life selection, and their ordered combination. A shared causal history pass records pre-map homes/form, caches per instance, and ignores international hosts for home counts. Reports include fitted parameters and row counts. Synthetic tests cover causality, decay, missing ratings, regional shrinkage/thresholds, parameter recovery, stage separation, composition and report integration. Checks: `UV_NO_SYNC=1 uv run pytest -q` (235 passed, 18.08s; baseline 224 in 24.95s), `uv run ruff format --check`, `uv run ruff check` (both with `UV_NO_SYNC=1`), and `git diff --check` passed. Plain offline `uv run` hit the local startup panic; `UV_NO_SYNC=1` uses the existing environment without network. Limits: not yet benchmarked on full data.
+
 ## 2026-10-28 — Model change rules and research ledger
 
 Docs only. Added tech.md "Model change rules" (two stages: tune on outcomes 2023-01 to 2025-09, validate frozen models against outcomes and Kalshi 2025-09 to 2026-07, holdout opened once; adopt only on a significant stage-1 gain with no guarded regression and ≥ 0.0005 for additions; confirm on stage 2; removals non-inferior; data fixes lighter), `docs/research/README.md` (ledger, backfilled with every variant tested so far and its partial-crawl numbers), and AGENTS.md pointers: ledger entries for every test, commit `docs/elo_backtest.md` with each model change (first full-data report pending the crawl). Checks: pytest.
