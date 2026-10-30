@@ -66,13 +66,11 @@ jobs:
             aws s3 sync "s3://$BUCKET/valorant-model/vlr" data/vlr --only-show-errors
           fi
           aws s3 sync "s3://$BUCKET/valorant-model/kalshi" data/kalshi --only-show-errors --exclude "books/*"
-          # S3 sets every mtime to its upload time, which can leave parsed pickles
-          # older than their raw pages; they were valid when uploaded, so mark them
-          # newer on a cache miss (a restored cache keeps its times; pages the crawl
-          # changes next are newer again and reparse).
-          if [ -z "$RESTORED_KEY" ]; then
-            find data/vlr/parsed -type f -exec touch {} + 2>/dev/null || true
-          fi
+          # Neither S3 nor the Actions cache keeps file times, which leaves parsed
+          # pickles looking older than their raw pages (a full 50-minute reparse).
+          # They were valid when saved, so mark them newer before the crawl; pages
+          # the crawl changes afterwards are newer again and reparse.
+          find data/vlr/parsed -type f -exec touch {} + 2>/dev/null || true
       - name: Crawl
         run: |
           uv run promval vlr crawl --since 2021-01-01 | tee "$RUNNER_TEMP/crawl.log"
@@ -142,6 +140,11 @@ jobs:
           bash scripts/setup_db.sh
           echo "DB build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
           echo "Rebuilt DB" >> "$GITHUB_STEP_SUMMARY"
+      # Builds can outlast the hour-long OIDC session; log in again for the uploads.
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
       - name: Save ratings snapshot
         if: steps.rebuild.outputs.skip != 'true'
         env:

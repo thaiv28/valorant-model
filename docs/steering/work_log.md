@@ -1,5 +1,9 @@
 # Work log
 
+## 2026-10-29 — refresh-db: fresh AWS login before uploads
+
+Branch `game-candidates`, base `main`. The first Valorant run with the speedups spent 52 min reparsing every match (`cached=0`: restored pickles looked older than their raw pages, since neither S3 nor the Actions cache keeps file times), then its snapshot upload failed with `ExpiredToken` (the OIDC session lasts an hour). Parsed pickles are now touched before every crawl, not only on a cache miss, and the job logs in to AWS again before the uploads. Checks: workflow tests, YAML parse.
+
 ## 2026-10-29 — refresh-db: no VLR S3 listing on a cache hit
 
 Branch `game-candidates`, base `main`. With the raw Actions cache restored, the VLR `aws s3 sync` still listed and compared ~77k objects (7.5 min of a run). Only this workflow writes them, so the sync now runs only on a cache miss; Kalshi data (written by the collector) still syncs every run. Checks: workflow tests, YAML parse. Timing to confirm on the next run.
